@@ -47,7 +47,7 @@ demo_seial_OLED_stm32f103rct6/
 │  │  └─ tasks/  # control / monitor / uwb / hmi / comm / housekeep（6 个 FreeRTOS 任务）
 │  └─ Modules/
 │     ├─ mpu6050/  # MPU6050 DMP 运动驱动（活动 IMU，I2C2）
-│     └─ dw1000/   # DW1000 UWB 寄存器/设备 API（bsp_uwb 以 UART-AT 方式驱动）
+│     └─ dw1000/   # DW3000 UWB 寄存器/设备 API（目录名沿用 dw1000，实为 DW3000；bsp_uwb 以 UART-AT 方式驱动 BU03）
 ├─ Motion_driver/  # MPU9250 eMPL 运动驱动 —— 保留但未编入
 ├─ Project/
 │  ├─ stm32f103RCT6.uvprojx  # Keil 工程
@@ -66,7 +66,7 @@ demo_seial_OLED_stm32f103rct6/
 |------|------|------|
 | FreeRTOS + 6 任务 + 各 BSP/算法/系统层 | **活动** | 固件主体，Keil 与 GNU 均编入 |
 | MPU6050 DMP（I2C2） | **活动** | 姿态解算 IMU（控制/HMI 任务依赖） |
-| DW1000 UWB（UART-AT） | **活动**（bsp 层） | `bsp_uwb.c` 以 AT 指令驱动，未直接调用 deca 底层 `.c` |
+| 安信可 BU03 UWB（基于 DW3000，UART-AT） | **活动**（bsp 层） | `bsp_uwb.c` 以 AT 指令驱动 BU03 模组，未直接调用 deca 底层 `.c` |
 | MPU9250 eMPL（Motion_driver/） | 保留不编译 | 工程统一采用 MPU6050 DMP 单 IMU 方案，MPU9250 文件原样保留但不参与默认编译 |
 
 > 选择理由（用户确认）：工程统一采用 **MPU6050 DMP 单 IMU 方案** 进行姿态解算，MPU9250 相关文件原样保留在目录中，

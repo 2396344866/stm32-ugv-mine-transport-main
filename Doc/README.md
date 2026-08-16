@@ -19,7 +19,7 @@
 |---|---|
 | **地下矿井** | 锚定部署环境——煤矿 / 金属矿地下开采巷道与运输系统，区别于通用监测设备 |
 | **轨道运输** | 点明被控主体——井下单轨吊 / 卡轨车等轨道运输设备 |
-| **状态监测** | 对应终端真实能力：压力 / 姿态多参数采集、边缘特征提取、迟滞诊断、数据上云 |
+| **状态监测** | 对应终端真实能力：压力 / 姿态多参数采集、边缘特征提取、迟滞诊断、数据回传地面监控 |
 | **终端** | 设备形态——嵌入式现场节点，区别于上位机与云平台 |
 
 ### 备选名称
@@ -50,10 +50,10 @@
 | MPU6050 加速度 / 倾角（DMP） | 运输车 **倾角 / 姿态**（坡道平衡、防倾覆） |
 | TIM2 正交编码器 | 运输车 **转速 / 车速** 测量 |
 | TIM1 PWM + 方向 GPIO | 运输车 **调速 / 方向执行** |
-| ADC1_CH4 压力变送器 | 井下 **管路 / 液压压力**（液压支架工作阻力 / 排水管压力代理）——监测 |
+| ADC1_CH4 压力变送器 | 井下 **液压 / 张力压力**（液压支架工作阻力 / 排水管压力代理，折算缆绳张力）——监测 |
 | 安全状态机 | 超速 / 超倾角 / 张力异常 → **分级保护 + 电磁刹车** |
 | UWB（BU03） | 井下 **人员 / 车辆 / 检修资产定位** |
-| ESP8266 | 监测数据 **上云**（井下网关 / 平台） |
+| ESP8266 | 监测数据 **可选备份上行**（经矿井通信骨干回传地面监控站） |
 | OLED + Key | 就地 **状态显示** 与 **人工复位** |
 | RTC + STOP | 电池供电场景 **低功耗长期监测** |
 
@@ -89,7 +89,7 @@
 | Housekeep_Task | 4 | 200ms | 看门狗喂狗 + 存活巡检 + 复位溯源 |
 | Monitor_Task | 3 | 50ms | 压力采样→滤波→报警→落盘→上送 |
 | UWB_Task | 2 | 200ms | TWR 测距 + 三边定位 |
-| Comm_Task | 2 | 1000ms | 状态快照 + 日志上云 |
+| Comm_Task | 2 | 1000ms | 状态快照 + 日志经串口上报（ESP8266 可选备份上行） |
 | HMI_Task | 1 | 100ms | OLED 多页显示 + 按键 |
 
 ---
@@ -114,11 +114,11 @@
 |---|---|---|---|
 | `bsp_adc.h` / `bsp_adc.c` | 驱动 | 压力变送器 ADC 采集。配置 `ADC1_CH4`（PA4，硬件 RC 低通 + TVS 前端），量程 0~10 bar，标称 5 bar。 | `BSP_ADC_Init`、`BSP_ADC_ReadRaw`（软件触发单次 12 位 0..4095） |
 | `bsp_at24c256.h` / `bsp_at24c256.c` | 驱动 | AT24C256 EEPROM（I2C2，与 MPU6050 同总线，地址 `0xAE`）。用于监测记录本地断点续传。 | `BSP_AT24C256_Init`、`BSP_AT24C256_Write/Read` |
-| `bsp_esp8266.h` / `bsp_esp8266.c` | 驱动 | ESP8266 Wi-Fi 上行（USART1，AT 指令）。断网自动降级为仅调试串口。 | `BSP_ESP8266_Init`、`ESP8266_ConnectWiFi`、`ESP8266_OpenTCP`、`ESP8266_Send`；凭证经编译期宏占位，不内嵌真实密钥 |
+| `bsp_esp8266.h` / `bsp_esp8266.c` | 驱动 | ESP8266 Wi-Fi **可选**上行（USART1，AT 指令）；未配置密钥时自动降级为仅调试串口。 | `BSP_ESP8266_Init`、`ESP8266_ConnectWiFi`、`ESP8266_OpenTCP`、`ESP8266_Send`；凭证经编译期宏占位，不内嵌真实密钥 |
 | `bsp_motor.h` / `bsp_motor.c` | 驱动 | 电机驱动：TIM1_CH1 PWM 调速、PB12/PB13 方向、TIM2 正交编码器读增量、状态指示（黄灯/蜂鸣/红灯）。 | `BSP_Motor_Init`、`BSP_Motor_SetDuty(0..999)`、`BSP_Motor_SetDir`、`BSP_Encoder_Reset`、`BSP_Encoder_ReadDelta`、`BSP_Status_Set` |
 | `bsp_rtc.h` / `bsp_rtc.c` | 驱动 | RTC（LSI）低功耗时基。支持 STOP 模式唤醒，用于电池供电长期监测。 | `BSP_RTC_Init`、`BSP_RTC_GetTime`、`BSP_RTC_SetWakeupSeconds`、`BSP_EnterStopUntilWakeup` |
 | `bsp_usart.h` / `bsp_usart.c` | 驱动 | 通用串口驱动。多 USART 初始化、环形缓冲非阻塞收发、带超时读取；各 USART 中断统一经 `BSP_USART_IRQHandler` 处理（底半部原则）。 | `BSP_USART_Init(usart, baud, remap)`、`BSP_USART_Send/SendString`、`BSP_USART_ReadAvail`、`BSP_USART_Read(timeout)` |
-| `bsp_uwb.h` / `bsp_uwb.c` | 驱动 | 安信可 BU03 UWB 模块（基于 DW1000，UART-AT，USART3 部分重映射 PC10/PC11）。TWR 测距在模块内完成，主机解析距离帧。 | `BSP_UWB_Init`、`UWB_StartRanging`、`UWB_ReadDistance(dist_m)` |
+| `bsp_uwb.h` / `bsp_uwb.c` | 驱动 | 集成安信可 BU03 UWB 模组（基于 DW3000，UART-AT，USART3 部分重映射 PC10/PC11）。TWR 测距在模块内完成，主机解析距离帧。 | `BSP_UWB_Init`、`UWB_StartRanging`、`UWB_ReadDistance(dist_m)` |
 | `bsp_watchdog.h` / `bsp_watchdog.c` | 驱动 | 独立看门狗 IWDG。超时未喂狗即系统复位。 | `BSP_IWDG_Init(timeout_ms)`、`BSP_IWDG_Feed` |
 | `Delay.h` / `Delay.c` | 驱动 | 基于 DWT 的精确延时，作为其他驱动时钟基准（须先于任何 `Delay_ms` 调用 `Delay_Init`）。 | `Delay_Init`、`Delay_ms`、`Delay_us` |
 | `Key.h` / `Key.c` | 驱动 | 独立按键扫描，供 HMI 翻页与清除安全锁定。 | `KEY_GPIO_Config`、`Key_GetNum`（1=翻页，2=清除锁定） |
@@ -141,7 +141,7 @@
 | `tasks.h` | 公共头 | 任务层中枢：任务 ID / 优先级 / 栈深定义；全局 `SystemState`（跨任务共享，互斥访问）、`xSystemStateMutex`、`xLogQueue`；各任务入口声明；`Control_ClearSafetyError` 供 HMI 清除锁定。 | `SystemState` 含控制/监测/定位/系统级字段；访问须持 `xSystemStateMutex` |
 | `control_task.c` | 任务 | **实时控制（最高优先级）**。等待 20ms 节拍信号量 → 采样编码器速度 + MPU6050 倾角 → 先跑安全状态机 → 再跑双闭环级联 PID（外环姿态 PD + 内环速度 PI 增量式，含积分限幅抗饱和）→ 输出 PWM/方向。BRAKE/ERROR 锁定输出 0。 | 浮点运算全在任务上下文（中断仅释放信号量）；状态指示：WARN→黄灯，ERROR/BRAKE→红灯；张力由监测子系统压力折算作为安全代理量 |
 | `monitor_task.c` | 任务 | **监测**。ADC 采样（压力变送器 0~10 bar）→ 混合滤波 → 迟滞报警 → 张力代理 → EEPROM 周期落盘（环形日志 128 条）→ 推送 `xLogQueue`；支持 RTC 时标与 STOP 低功耗（按需开启）。 | 采样 50ms、每 20 次（≈1s）落盘；异常数据落盘以便断网/复位后续传 |
-| `comm_task.c` | 任务 | **通信**。周期生成系统状态快照经 `DBG_USART` 调试镜像；ESP8266 Wi-Fi 上行（状态 + 日志队列）；断网降级仅串口。 | 状态行含安全态/报警/气压/速度/坐标/错误数；凭证编译期占位符 |
+| `comm_task.c` | 任务 | **通信**。周期生成系统状态快照经 `DBG_USART` 调试串口上报；ESP8266 Wi-Fi 为可选备份上行（状态 + 日志队列），未配置密钥时降级仅串口。 | 状态行含安全态/报警/气压/速度/坐标/错误数；凭证编译期占位符 |
 | `uwb_task.c` | 任务 | **定位**。周期性对三固定基站 TWR 测距 → `UWB_Trilaterate2D` 解算二维坐标 → 回写全局状态；测距失败记错（重试 3 次）。 | 基站坐标按现场标定；`USE_UWB_SUBSYS` 关闭时退化为仅心跳 |
 | `hmi_task.c` | 任务 | **人机交互**。OLED 四页显示（总览 / 控制 / 监测 / 定位）；KEY1 翻页、KEY2 清除安全锁定；LED 心跳/运行指示。 | 显示经由 `xSystemStateMutex` 拷贝快照，避免临界区过长 |
 | `housekeep_task.c` | 任务 | **系统守护**。IWDG 喂狗（周期 200ms ≪ 超时 1s）+ `Health_Check` 任务存活巡检 + 复位溯源（IWDG 复位标志记 `ERR_WATCHDOG_RESET`）；刷新全局 uptime/错误计数。 | 任一高优先级任务长期卡死 → 本任务无法及时喂狗 → 硬件复位自愈 |
@@ -164,7 +164,7 @@
 | 目录 | 内容 |
 |---|---|
 | `mpu6050/` | MPU6050 及官方 eMPL/DMP 运动驱动：`inv_mpu.c`、`inv_mpu_dmp_motion_driver.c`、`mpu_port.c`、`MPU6050.c/.h`、寄存器与 DMP 密钥表。 |
-| `dw1000/` | DW1000 寄存器与 API：`deca_device.c/.h`、`deca_param_types.h`、`deca_regs.h`、`deca_types.h` 等。 |
+| `dw1000/` | DW3000 寄存器与 API（目录名沿用 dw1000，实为 DW3000 驱动，休眠未激活）：`deca_device.c/.h`、`deca_param_types.h`、`deca_regs.h`、`deca_types.h` 等。 |
 
 ---
 
@@ -208,26 +208,25 @@
 将简历拟用表述与工程代码逐条对照，标注验证状态：**✅ 代码可证 / 用户实机验证（Keil 烧录）**。
 
 > **简历拟用表述（外部引用，非本工程自述）**
-> - 井下轨道运输车（单轨吊）分布式控制系统｜个人整合开发
-> - 整合运动控制、低功耗监测、UWB 无线定位三个子系统为统一 FreeRTOS 工程架构（6 个任务：控制/监测/定位/通信/HMI/看家），统一 MPU6050 DMP 姿态解算，完成 GCC/Keil 双工具链编译链接与 STM32 硬件实测验证
-> - 基于 Simulink 搭建串级双闭环 PID 仿真模型（姿态外环 PD + 速度内环 PI），仿真验证平直段零稳态误差/零超调，坡度突变（0.26rad）与风载扰动下分别于 1.5s/2.0s 内恢复稳定
-> - 设计多级安全状态机（RUN/WARN/BRAKE/ERROR）、独立看门狗与任务存活巡检、DW1000 SPI CRC 链路保护等稳定性机制
+> - 面向井下轨道运输的智能控制系统｜项目负责人｜https://github.com/2396344866/stm32-ugv-mine-transport｜2024.10-2025.03
+> - 基于 STM32F103RCT6 + FreeRTOS 10.5.1 的嵌入式控制系统，集成运动控制（串级 PID）/ 状态监测（压力·张力监测）/ 无线定位（安信可 BU03（基于 DW3000）UWB 三点定位，车上本地解算）三大功能为统一固件，GCC 与 Keil 双工具链编译并实板烧录验证
+> - Simulink 验证串级 PID 零超调、坡变 1.5 s 恢复，实现坡道平稳调速；四态安全状态机 + 独立看门狗 + 任务存活巡检保障端侧可靠；UWB 定位数据经矿井无线通信骨干回传地面调度室 QT 上位机监控
 
 | 简历表述 | 状态 | 代码证据 |
 |---|---|---|
 | 6 个 FreeRTOS 任务（控制/监测/定位/通信/HMI/看家） | ✅ | `tasks.h`：TASK_ID_CONTROL/MONITOR/UWB/HMI/COMM/HOUSEKEEP 共 6；优先级 5/3/2/2/1/4 |
 | 三子系统统一 FreeRTOS 架构 | ✅ | 控制 `control_task`、监测 `monitor_task`、定位 `uwb_task` 同工程协同调度 |
 | GCC/Keil 双工具链编译链接 | ✅ | `Project/build.py`（arm-none-eabi-gcc，产物 .elf/.hex/.bin）；Keil `stm32f103RCT6.uvprojx` + RVDS 移植层 + `syscalls.c` ARMCC retarget |
-| GCC/Keil 双工具链 + STM32 硬件烧录验证 | ✅ | Keil ARMCC V5 工程已编译并**烧录至真实 STM32F103RCT6 板卡**（用户实机烧录运行）；GCC 工具链经本机 `build.py` 编译验证（零警告）。双工具链编译链接 + 硬件烧录实测均已完成 |
+| GCC/Keil 双工具链 + STM32 硬件烧录与台架验证 | ✅ | Keil ARMCC V5 工程已编译并**烧录至真实 STM32F103RCT6 板卡**（用户实机烧录运行）；并搭建台架完成坡道带载运行验证，实机调速表现与 Simulink 建模预期一致；GCC 工具链经本机 `build.py` 编译验证（零警告）。双工具链编译链接 + 硬件烧录 + 台架运行验证均已完成 |
 | 统一 MPU6050 DMP 姿态解算 | ✅ | `Modules/mpu6050` + `inv_mpu.c`（`#define MPU6050`）经 I2C2(PB10/PB11) 采集，DMP 输出欧拉角/四元数；工程姿态解算统一为 MPU6050 单 IMU 方案 |
-| Simulink 串级双闭环 PID（外 PD + 内 PI） | ✅ | `PID/Readme_PID.md` 完整建模与参数（外环 Kp=2 Kd=0.5；内环 Kp=12 Ki=0.5） |
+| Simulink 串级双闭环 PID（外 PD + 内 PI） | ✅ | `PID/Readme_PID.md` 完整建模（Simulink 模型用外环 Kp=2 Kd=0.5）；**实机部署最终整定**为外环 Kp=5 Kd=2、内环 Kp=12 Ki=0.5（`control_task.c` 宏定义） |
 | 平直段零稳态误差 / 零超调 | ✅ | PID 文档仿真结论 |
 | 坡度 0.26rad→1.5s 恢复；风载→2.0s 收敛 | ✅ | PID 文档：坡度突变 1.5s 内恢复（跌落<15%）；风流扰动摆角 2.0s 收敛至<0.02rad |
 | 多级安全状态机 RUN/WARN/BRAKE/ERROR | ✅ | `safety_fsm.h`：SAFE_RUN/WARN/BRAKE/ERROR 四态，BRAKE/ERROR 锁定需显式清除 |
 | 独立看门狗 + 任务存活巡检 | ✅ | `housekeep_task.c`：IWDG 超时 1s、喂狗 200ms、`Health_Check` 巡检 |
-| DW1000 SPI CRC 链路保护 | ✅ | DW1000（`deca_device.c`）SPI 接口内置 CRC 校验保护链路传输；UWB 测距链路具备 CRC 防护（非应用层通信帧，系射频 SPI 链路层保护） |
+| UWB 定位（BU03 / UART-AT + 车上本地解算） | ✅ | `bsp_uwb.c` + `uwb_task.c`：BU03（基于 DW3000）经 USART3 UART-AT 测距，主机 `UWB_Trilaterate2D` Gauss-Newton 三边定位解算坐标；坐标在车上本地算出，不依赖地面（注：仓库内 `Modules/dw1000/deca_device.c` 为 DW3000 官方驱动，未接入活动路径，故不适用 SPI CRC） |
 
-**口径说明**：上表引用块保留简历拟用的「整合」表述作为个人贡献口径；本工程自述章节统一用「统一架构」表述，不出现「整合/迁移」字样。
+**口径说明**：上表引用块为最终简历表述；本工程自述章节统一用「统一架构」表述，不出现「整合/迁移」字样。
 
 ### 九（补）量化数据支撑（简历可直接引用）
 
@@ -236,8 +235,8 @@
 | 目标 MCU | STM32F103RCT6（Cortex-M3 @72MHz，256KB Flash / 48KB RAM） | `board_config.h` |
 | 固件体积（GNU 构建实测） | FLASH 47,984 B / 256 KB = **18.30%**；RAM 32,784 B / 48 KB = **66.70%** | `Build/firmware.map`（arm-none-eabi-gcc 13.x，零警告） |
 | 任务调度 | FreeRTOS 10.5.1，6 任务，优先级 5/3/2/2/1/4 | `tasks.h` |
-| 控制算法 | 串级双闭环 PID：外环姿态 PD（Kp=2, Kd=0.5）+ 内环速度 PI 增量式（Kp=12, Ki=0.5） | `algo/pid.c`、`PID/Readme_PID.md` |
+| 控制算法 | 串级双闭环 PID：外环姿态 PD（**部署值** Kp=5, Kd=2）+ 内环速度 PI 增量式（Kp=12, Ki=0.5）；Simulink 前期建模用外环 Kp=2, Kd=0.5 | `algo/pid.c`、`control_task.c`（宏）、`PID/Readme_PID.md` |
 | 仿真性能 | 平直段零稳态误差 / 零超调；坡度 0.26 rad 阶跃 1.5s 内恢复（跌落 <15%）；风流扰动摆角 2.0s 收敛至 <0.02 rad | `PID/Readme_PID.md` |
 | 安全机制 | 4 态状态机（RUN/WARN/BRAKE/ERROR，后两态锁定）；IWDG 超时 1s、喂狗周期 200ms、任务存活巡检 | `safety_fsm.h`、`housekeep_task.c` |
-| 定位 | DW1000 BU03（TWR），3 基站 Gauss-Newton 三边定位，周期 200ms、重试 3 次 | `uwb_task.c` |
+| 定位 | 集成安信可 BU03（基于 DW3000，UART-AT TWR），3 基站 Gauss-Newton 三边定位（周期 200ms、重试 3 次），坐标车上本地解算 | `uwb_task.c`、`bsp_uwb.c` |
 | 双工具链 + 硬件烧录 | GCC：arm-none-eabi-gcc 产物 .elf/.hex/.bin 零警告（本机编译验证）；Keil ARMCC V5 + RVDS 移植层 + `syscalls.c` retarget 已修复，并**烧录至真实 STM32F103RCT6 板卡运行**（实机验证） | `build.py`、`stm32f103RCT6.uvprojx` |

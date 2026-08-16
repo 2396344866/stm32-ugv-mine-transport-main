@@ -23,7 +23,7 @@
 #define USE_ESP8266             1   /* ESP8266 WiFi 数据上传            */
 #define USE_AT24C256            1   /* AT24C256 EEPROM 本地存储         */
 #define USE_MPU6050_DMP         1   /* MPU6050 DMP 姿态解算             */
-#define UWB_USE_DW1000_SPI      0   /* 0:BU03 UART-AT 路径; 1:DW1000 直驱SPI路径 */
+#define UWB_USE_DW3000_SPI      0   /* 0:BU03(UART-AT) 路径; 1:DW3000 直驱SPI路径(休眠, 未编译) */
 
 /* ----- 实时性 ----- */
 #define CONTROL_PERIOD_MS       20  /* 20ms 确定性控制节拍              */
