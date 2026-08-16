@@ -1,0 +1,35 @@
+# ===== 构建产物 / IDE 输出（不入库） =====
+Core_system/Build/
+Core_system/Project/Objects/
+Core_system/Project/Listings/
+*.o
+*.axf
+*.elf
+*.hex
+*.bin
+*.map
+*.crf
+*.d
+*.dep
+*.lint
+*.bak
+*.uvoptx
+JLinkLog.txt
+*.scvd
+
+# ===== 第三方禁分发库（InvenSense eMPL / DMP） =====
+# MPU DMP 库需从 TDK / InvenSense 官方获取，不随仓发布（许可证禁止再分发）
+Core_system/Motion_driver/driver/eMPL/
+Core_system/Motion_driver/libmpllib.lib
+Core_system/Motion_driver/mpl/libmpllib.lib
+Core_system/User/Modules/mpu6050/inv_mpu.c
+Core_system/User/Modules/mpu6050/inv_mpu.h
+Core_system/User/Modules/mpu6050/inv_mpu_dmp_motion_driver.c
+Core_system/User/Modules/mpu6050/inv_mpu_dmp_motion_driver.h
+Core_system/User/Modules/mpu6050/dmpKey.h
+Core_system/User/Modules/mpu6050/dmpmap.h
+Core_system/User/Modules/mpu6050/libmpllib.lib
+
+# ===== OS / 编辑器 =====
+.DS_Store
+Thumbs.db
