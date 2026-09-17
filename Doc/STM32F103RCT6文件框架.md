@@ -1,6 +1,6 @@
 # STM32F103RCT6 固件工程（demo_seial_OLED 版）
 
-> 内部承载固件的 FreeRTOS + 6 任务 + 姿态/控制/监测/定位/通信/HMI + 看门狗/错误/健康等
+> 内部承载固件的 FreeRTOS + 7 任务 + 姿态/控制/监测/定位/通信/HMI/车身CAN + 看门狗/错误/健康等
 > 全套功能。
 
 ---
@@ -44,7 +44,7 @@ demo_seial_OLED_stm32f103rct6/
 │  │  ├─ bsp/    # Delay/Key/LED/OLED/ADC/AT24C256/ESP8266/Motor/RTC/USART/UWB/Watchdog
 │  │  ├─ algo/   # pid / filter / alarm / safety_fsm / uwb_2d（2D 三边定位）
 │  │  ├─ sys/    # error / health / scheduler（20ms 确定性控制节拍 TIM3）
-│  │  └─ tasks/  # control / monitor / uwb / hmi / comm / housekeep（6 个 FreeRTOS 任务）
+│  │  └─ tasks/  # control / monitor / uwb / hmi / comm / housekeep / bcm（7 个 FreeRTOS 任务）
 │  └─ Modules/
 │     ├─ mpu6050/  # MPU6050 DMP 运动驱动（活动 IMU，I2C2）
 │     └─ dw1000/   # DW3000 UWB 寄存器/设备 API（目录名沿用 dw1000，实为 DW3000；bsp_uwb 以 UART-AT 方式驱动 BU03）
@@ -64,7 +64,8 @@ demo_seial_OLED_stm32f103rct6/
 
 | 类别 | 状态 | 说明 |
 |------|------|------|
-| FreeRTOS + 6 任务 + 各 BSP/算法/系统层 | **活动** | 固件主体，Keil 与 GNU 均编入 |
+| FreeRTOS + 7 任务 + 各 BSP/算法/系统层 | **活动** | 固件主体，Keil 与 GNU 均编入 |
+| 车身 CAN（片内 bxCAN，PA11/PA12 + TJA1050） | **活动** | BCM 向车门控制器下发落锁指令；详见 `Doc/CAN_BCM车门落锁.md` |
 | MPU6050 DMP（I2C2） | **活动** | 姿态解算 IMU（控制/HMI 任务依赖） |
 | 安信可 BU03 UWB（基于 DW3000，UART-AT） | **活动**（bsp 层） | `bsp_uwb.c` 以 AT 指令驱动 BU03 模组，未直接调用 deca 底层 `.c` |
 | MPU9250 eMPL（Motion_driver/） | 保留不编译 | 工程统一采用 MPU6050 DMP 单 IMU 方案，MPU9250 文件原样保留但不参与默认编译 |
@@ -114,7 +115,7 @@ python build.py clean      # 清理
 
 - 调试串口：`USART2`（PA2/PA3，115200），`printf` 重定向到此；`USART1/USART3` 供 ESP8266/UWB。
 - 烧录：STM32CubeProgrammer 或 Keil（ST-Link）写入 `Build/firmware.hex`（或 `.bin` @ 0x08000000）。
-- 上电后 FreeRTOS 启动 6 个任务；TIM3 产生 20ms 确定性控制节拍（二值信号量驱动双闭环 PID）；
+- 上电后 FreeRTOS 启动 7 个任务；TIM3 产生 20ms 确定性控制节拍（二值信号量驱动双闭环 PID）；
   IWDG 看门狗 + 任务存活巡检 + 统一错误日志 + 栈溢出/Malloc 失败钩子保障稳定性。
 
 ---

@@ -119,6 +119,7 @@ SOURCES = [
     "User/app/algo/alarm.c",
     "User/app/algo/safety_fsm.c",
     "User/app/algo/uwb_2d.c",
+    "User/app/algo/bcm_door.c",
     # BSP 层
     "User/app/bsp/Delay.c",
     "User/app/bsp/Key.c",
@@ -132,6 +133,7 @@ SOURCES = [
     "User/app/bsp/bsp_usart.c",
     "User/app/bsp/bsp_uwb.c",
     "User/app/bsp/bsp_watchdog.c",
+    "User/app/bsp/bsp_can.c",
     # 任务层
     "User/app/tasks/control_task.c",
     "User/app/tasks/monitor_task.c",
@@ -139,6 +141,7 @@ SOURCES = [
     "User/app/tasks/hmi_task.c",
     "User/app/tasks/comm_task.c",
     "User/app/tasks/housekeep_task.c",
+    "User/app/tasks/bcm_task.c",
     # MPU6050 DMP 运动驱动
     "User/Modules/mpu6050/MPU6050.c",
     "User/Modules/mpu6050/inv_mpu.c",

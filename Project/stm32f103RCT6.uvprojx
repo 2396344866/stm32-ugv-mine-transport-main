@@ -644,7 +644,12 @@
               <FileType>1</FileType>
               <FilePath>..\User\app\algo\uwb_2d.c</FilePath>
             </File>
-          </Files>
+                      <File>
+              <FileName>bcm_door.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\User\app\algo\bcm_door.c</FilePath>
+            </File>
+</Files>
         </Group>
         <Group>
           <GroupName>App_BSP</GroupName>
@@ -709,7 +714,12 @@
               <FileType>1</FileType>
               <FilePath>..\User\app\bsp\bsp_watchdog.c</FilePath>
             </File>
-          </Files>
+                      <File>
+              <FileName>bsp_can.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\User\app\bsp\bsp_can.c</FilePath>
+            </File>
+</Files>
         </Group>
         <Group>
           <GroupName>App_Tasks</GroupName>
@@ -744,7 +754,12 @@
               <FileType>1</FileType>
               <FilePath>..\User\app\tasks\housekeep_task.c</FilePath>
             </File>
-          </Files>
+                      <File>
+              <FileName>bcm_task.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\User\app\tasks\bcm_task.c</FilePath>
+            </File>
+</Files>
         </Group>
         <Group>
           <GroupName>Modules_MPU6050</GroupName>

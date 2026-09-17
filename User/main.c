@@ -4,7 +4,7 @@
   *
   *  系统架构：
   *    - 硬件初始化(SystemInit 已由 startup 调用，配 72MHz)
-  *    - FreeRTOS 抢占式调度：控制环 / 守护 / 监测 / 定位 / 通信 / HMI
+  *    - FreeRTOS 抢占式调度：控制环 / 守护 / 监测 / 定位 / 通信 / HMI / 车身CAN
   *    - 20ms 确定性控制节拍(TIM3 -> 二值信号量)驱动双闭环 PID
   *    - 高稳定性：IWDG 看门狗 + 任务存活巡检 + 统一错误记录 + 栈溢出钩子
   */
@@ -23,11 +23,13 @@
 #include "bsp_at24c256.h"
 #include "bsp_rtc.h"
 #include "MPU6050.h"
+#include "bcm_door.h"     /* 车身 CAN 请求结构体（队列元素类型） */
 
 /* 全局对象（定义于本文件，其余模块经 tasks.h 引用） */
 SystemState        g_state;
 SemaphoreHandle_t  xSystemStateMutex = NULL;
 QueueHandle_t      xLogQueue = NULL;
+QueueHandle_t      xDoorCmdQueue = NULL;   /* 门锁请求队列（BCM 任务消费） */
 
 /* ------------------------------------------------------------------ */
 /*  FreeRTOS 钩子                                                       */
@@ -106,6 +108,9 @@ int main(void)
     /* 跨任务共享资源 */
     xSystemStateMutex = xSemaphoreCreateMutex();
     xLogQueue         = xQueueCreate(16, 8);   /* 监测记录缓冲(8 字节/条) */
+#if USE_CAN_SUBSYS
+    xDoorCmdQueue     = xQueueCreate(4, sizeof(DoorLockReq));  /* 门锁请求缓冲 */
+#endif
 
     Health_Init();
 
@@ -119,6 +124,9 @@ int main(void)
     xTaskCreate(UWB_Task,       "UWB",   TASK_STACK_DEFAULT, NULL, TASK_PRIO_UWB,       NULL);
     xTaskCreate(Comm_Task,      "COMM",  TASK_STACK_DEFAULT, NULL, TASK_PRIO_COMM,      NULL);
     xTaskCreate(HMI_Task,       "HMI",   TASK_STACK_HMI,     NULL, TASK_PRIO_HMI,       NULL);
+#if USE_CAN_SUBSYS
+    xTaskCreate(BCM_Task,       "BCM",   TASK_STACK_BCM,     NULL, TASK_PRIO_BCM,       NULL);
+#endif
 
     vTaskStartScheduler();
 

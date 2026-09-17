@@ -2,12 +2,13 @@
   * @file    hmi_task.c
   * @brief   人机交互任务：OLED 多页状态显示 + 按键交互 + LED 心跳
   *
-  *  页面(KEY1 切换)：
-  *    Page0 总览：安全态 / 报警 / 运行时长
-  *    Page1 控制：速度 / 倾角 / PWM 占空比
-  *    Page2 监测：气压(原始/滤波) / 报警等级
-  *    Page3 定位：坐标 / 三基站距离 / 解算有效
-  *   KEY2：清除安全锁定态(从 BRAKE/ERROR 恢复)
+ *  页面(KEY1 切换)：
+ *    Page0 总览：安全态 / 报警 / 运行时长
+ *    Page1 控制：速度 / 倾角 / PWM 占空比
+ *    Page2 监测：气压(原始/滤波) / 报警等级
+ *    Page3 定位：坐标 / 三基站距离 / 解算有效
+ *    Page4 车门：四门锁状态位图 / 是否有在途 CAN 指令
+ *   KEY2：清除安全锁定态(从 BRAKE/ERROR 恢复)
   */
 #include "tasks.h"
 #include "oled.h"
@@ -16,7 +17,7 @@
 #include <string.h>
 
 #define HMI_PERIOD_MS   (100)
-#define HMI_PAGES       (4)
+#define HMI_PAGES       (5)     /* 0..4，Page4 为车身 CAN 门锁 */
 
 static const char* safety_str(SafetyState s)
 {
@@ -116,6 +117,22 @@ void HMI_Task(void* pvParameters)
                 OLED_ShowFloat(3, 7, snap.position.y, 6, 2);
                 OLED_ShowString(4, 1, snap.uwb_valid ? "LOCK" : "NOLOCK");
                 break;
+            case 4:
+            {
+                /* 车身 CAN：门锁到位位图 bit0..3 = 左前/右前/左后/右后 */
+                char bits[5] = {'0', '0', '0', '0', '\0'};
+                uint8_t i;
+                for (i = 0; i < 4u; i++)
+                {
+                    bits[i] = (snap.door_lock_mask & (uint8_t)(1u << i)) ? '1' : '0';
+                }
+                OLED_ShowString(1, 1, "== DOOR/CAN ==");
+                OLED_ShowString(2, 1, "Lock:");
+                OLED_ShowString(2, 7, bits);          /* 例：0110 表示右前/左后已锁 */
+                OLED_ShowString(3, 1, "Busy:");
+                OLED_ShowNum(3, 7, snap.door_cmd_busy, 1);
+                break;
+            }
             default: break;
         }
 

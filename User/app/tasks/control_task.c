@@ -16,6 +16,7 @@
 #include "filter.h"
 #include "bsp_motor.h"
 #include "bsp_watchdog.h"
+#include "bcm_door.h"     /* 车身 CAN 联动：安全锁定 -> 全车落锁 */
 #include "MPU6050.h"     /* MPU6050_DMP_GetData（USE_MPU6050_DMP 分支） */
 
 /* ---- 控制参数（可按项目整定，集中管理便于调参） ---- */
@@ -110,6 +111,21 @@ void Control_Task(void* pvParameters)
 
         /* --- 2. 安全状态机（先于控制生效，越限即动作） --- */
         SafetyState st = Safety_Update(&s_safety, speed, angle, tension);
+
+#if USE_CAN_SUBSYS
+        /* 车身联动：仅在"刚进入" BRAKE/ERROR 锁定时请求一次全车落锁，
+         * 避免在锁定态持续期间每 20ms 重复下发（队列也会因此被灌满）。
+         * 请求入口只做非阻塞入队，实际组帧/发送/重试由 BCM 任务负责。 */
+        static SafetyState s_prev_safe = SAFE_RUN;
+        if ((st == SAFE_BRAKE || st == SAFE_ERROR) && s_prev_safe != st)
+        {
+            if (BCM_RequestDoorLock(DOOR_MASK_ALL, DOOR_ACT_LOCK) != 0)
+            {
+                Error_Record(ERR_CAN_TX_TIMEOUT);
+            }
+        }
+        s_prev_safe = st;
+#endif
 
         /* --- 3. 级联 PID --- */
         float target_speed = 0.0f;

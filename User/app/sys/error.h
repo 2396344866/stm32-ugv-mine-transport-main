@@ -15,8 +15,14 @@ typedef enum
     ERR_MPU_DMP          = 6,
     ERR_RTC_CONFIG       = 7,
     ERR_WATCHDOG_RESET   = 8,
+    ERR_CAN_TX_TIMEOUT   = 9,   /* 门锁指令重发达上限仍未收到回执 */
+    ERR_CAN_BUSOFF       = 10,  /* CAN 总线关闭（Bus-Off） */
+    ERR_CAN_INIT         = 11,  /* bxCAN 初始化失败 */
     ERR_UNKNOWN          = 0xFF
 } SysErrCode;
+
+/* 可与数值互转的错误码总数（供错误计数数组定长） */
+#define ERR_CODE_COUNT      (12)
 
 void     Error_Record(SysErrCode code);
 uint32_t Error_CountTotal(void);

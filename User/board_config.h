@@ -23,6 +23,7 @@
 #define USE_ESP8266             1   /* ESP8266 WiFi 数据上传            */
 #define USE_AT24C256            1   /* AT24C256 EEPROM 本地存储         */
 #define USE_MPU6050_DMP         1   /* MPU6050 DMP 姿态解算             */
+#define USE_CAN_SUBSYS          1   /* bxCAN 车身总线（BCM ↔ 车门控制器） */
 #define UWB_USE_DW3000_SPI      0   /* 0:BU03(UART-AT) 路径; 1:DW3000 直驱SPI路径(休眠, 未编译) */
 
 /* ----- 实时性 ----- */
@@ -103,6 +104,52 @@
 
 /* --- MPU6050 DMP 姿态（I2C2, PB10/PB11, 定义见 MPU6050_Reg.h） --- */
 #define MPU_I2C             I2C2
+
+/* =========================================================================
+ *  车身 CAN 子系统（bxCAN + TJA1050）
+ *  STM32F103RCT6 片内 bxCAN 控制器支持 CAN 2.0A/B，外接 TJA1050 完成
+ *  TTL<->CAN差分电平转换；本工程担当车身控制模块（BCM），向车门控制器
+ *  下发门锁指令。详见 Doc/CAN_BCM车门落锁.md
+ * ========================================================================= */
+
+/* --- 引脚：默认映射 CAN_RX=PA11 / CAN_TX=PA12（不做 AFIO 重映射 ---
+ * PA11/PA12 同时是 USB 引脚，本工程未使用 USB，无冲突；
+ * PB8/PB9 为 I2C1/OLED/CAN 完全重映射脚，已占用，故不重映射。 */
+#define BCM_CAN                 CAN1
+#define BCM_CAN_CLK             RCC_APB1Periph_CAN1
+#define BCM_CAN_GPIO_CLK        RCC_APB2Periph_GPIOA
+#define BCM_CAN_RX_PORT         GPIOA
+#define BCM_CAN_RX_PIN          GPIO_Pin_11
+#define BCM_CAN_TX_PORT         GPIOA
+#define BCM_CAN_TX_PIN          GPIO_Pin_12
+#define BCM_CAN_RX0_IRQn        USB_LP_CAN1_RX0_IRQn
+/* F103 中 CAN1 RX0 与 USB 低优先级中断共用向量；USB 未使用，独占 */
+#define BCM_CAN_RX0_IRQ_PREEMPT (11)  /* == configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY，允许 ISR 内调用 FromISR API */
+
+/* --- 位时基：CAN 挂 APB1（PCLK1=36MHz） ---
+ *  tq = BRP / PCLK1 = 8 / 36MHz ≈ 0.2222us
+ *  位时间 = 1(SYNC) + BS1(5tq) + BS2(3tq) = 9tq = 2.0us  ->  500 kbit/s
+ *  采样点 = (1+5)/9 = 66.7%（符合 CiA 建议 75% 附近容差，车身低速总线常用值）
+ *  换波特率只改 BRP：250k->16, 125k->32, 100k->40（其余位段不变） */
+#define CAN_PCLK1_HZ            (36000000u)
+#define CAN_BRP                 (8u)            /* 500 kbit/s */
+/* 注意：不可命名为 CAN_BS1/CAN_BS2/CAN_SJW —— 它们同时是 CAN_InitTypeDef 的
+ * 成员名，宏展开会把 can.CAN_BS1 变成 can.((uint8_t)0x04) 而编译失败。 */
+#define CAN_BS1_TQ              CAN_BS1_5tq
+#define CAN_BS2_TQ              CAN_BS2_3tq
+#define CAN_SJW_TQ              CAN_SJW_1tq
+
+/* 0=正常模式（挂 TJA1050 与真实车门控制器通信）；
+ * 1=回环自检（片内自发自收，无需对端节点即可验证收发链路，仅调试用）。
+ * 用 #ifndef 包裹是为了让验证脚本能以 -DCAN_LOOPBACK_SELFTEST=1 编译该分支，
+ * 否则这条路径在默认配置下从不参与构建，等于未验证的死代码。 */
+#ifndef CAN_LOOPBACK_SELFTEST
+#define CAN_LOOPBACK_SELFTEST   (0)
+#endif
+
+/* --- 车身总线节点地址（5 bit，0..31） --- */
+#define CAN_ADDR_BCM            0x01u   /* 本节点：车身控制模块              */
+#define CAN_ADDR_DOOR_CTRL      0x10u   /* 车门控制器（集中驱动四门锁执行器）*/
 
 /* --- AT24C256 EEPROM（I2C2 共享总线, 地址 0xAE = 0x57<<1） --- */
 #define AT24C256_ADDR       0xAE
