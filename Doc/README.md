@@ -1,3 +1,8 @@
+---
+status: active
+owner: user
+scope: 项目背景与设备定位、命名理由（背景侧）；技术架构见根 Readme.md
+---
 # 地下矿井轨道运输与状态监测终端
 
 > 固件代号：`STM32F103RCT6_EdgeNode` ｜ 版本：`1.0.0` ｜ 主核：STM32F103RCT6（Cortex-M3，72MHz，256KB Flash / 48KB RAM）

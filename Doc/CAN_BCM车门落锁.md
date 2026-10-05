@@ -1,3 +1,8 @@
+---
+status: active
+owner: user
+scope: CAN 车身总线 BCM→车门落锁指令的实现与硬件链路；不含其他 CAN 报文
+---
 # CAN 车身总线：BCM → 车门控制器「落锁指令」实现
 
 > 目标：车身控制模块（**BCM**）经 CAN 向车门控制器下发落锁指令，

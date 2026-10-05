@@ -1,3 +1,8 @@
+---
+status: active
+owner: user
+scope: Simulink 串级双闭环仿真验证报告（物理模型 + 测参过程）；是仿真结论，不是实车实测
+---
 
 ---
 

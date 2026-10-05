@@ -1,3 +1,8 @@
+---
+status: active
+owner: user
+scope: 固件工程构建环境、目录结构、7 任务清单；不含 CAN 协议实现
+---
 # STM32F103RCT6 固件工程（demo_seial_OLED 版）
 
 > 内部承载固件的 FreeRTOS + 7 任务 + 姿态/控制/监测/定位/通信/HMI/车身CAN + 看门狗/错误/健康等
