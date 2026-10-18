@@ -18,12 +18,37 @@
 
 /* ---- 监测参数 ---- */
 #define MONITOR_PERIOD_MS     (50)     /* 采样周期 */
-#define MONITOR_LOG_PERIOD    (20)     /* 每 20 次采样(1s)落盘一次 */
+#define MONITOR_LOG_PERIOD    (600)    /* 每 600 次采样(30s)心跳落盘一次——见下方磨损均衡说明 */
+#define MONITOR_RING_N        (60)     /* RAM 环形缓冲深度(条)：60×50ms=3s 现场数据 */
 #define PRESSURE_VREF         (3.3f)
 #define PRESSURE_FULL_SCALE   (10.0f)  /* 变送器量程 0..10 bar */
 #define PRESSURE_NOMINAL      (5.0f)   /* 标称气压(bar)，报警参考 */
 #define FILTER_ALPHA          (0.2f)   /* 一阶滞后系数 */
 #define TENSION_PER_BAR       (15.0f)  /* 气压 -> 张力代理增益(N/bar) */
+
+/* ============================================================================
+ * EEPROM 磨损均衡（wear leveling）—— 为什么心跳是 30s 而不是 1s
+ *
+ *  AT24C256C datasheet Table 4-6：Write Endurance = 1,000,000 Write Cycles，
+ *  **按字节(cell)计，不按页计**。页(64B)只是 I2C 写缓冲的传输粒度，
+ *  擦写动作只作用到目标字节的浮栅，因此同一页内两个不同字节各享独立预算。
+ *  ⇒ head A(0x0000)/head B(0x0008) 分处两个字节单元，A/B 交替即得 2× 延寿；
+ *    **无需为「跨页」而挪地址**（那既无收益，又会在面试中说错 EEPROM 机理）。
+ *
+ *  但 A/B 只解决 head 自身的耐久，不解决「写得太频繁」。按每条日志提交一次
+ *  head、A/B 轮换 ⇒ 每份 head 每 2×30s 被写一次（心跳 30s 时），
+ *  寿命 = 1e6 × 60 s ≈ 694 天；若沿用 1s 落盘则仅 ≈23 天，直接写穿。
+ *
+ *  磨损账（1e6 次 / 区域）：
+ *    日志区  128 槽均摊，每槽每 128×30s=64min 覆盖一次 ⇒ ≈21 年
+ *    head A/B 每 60s 一次                                  ⇒ ≈694 天
+ *  系统实际寿命被最短腿（head）决定，故降频收益是决定性的。
+ *
+ *  配套策略：正常工况走 30s 低频心跳（省寿命、够事后追溯）；
+ *  一旦 alarm 越限或安全态异常，立即进入**黑匣子模式**——把 RAM 环形缓冲里
+ *  保留的最近 3s 现场数据连同当前点全速刷入 EEPROM，保证故障瞬间不丢。
+ *  由此把「寿命」与「黑匣子完整性」解耦：两者不再互相妥协。
+ * ==========================================================================*/
 
 /* ============================================================================
  * EEPROM 环形日志布局（工业界掉电安全做法）
@@ -93,6 +118,111 @@ static uint32_t get_u32_le(const uint8_t* p)
 static Filter_Handle    s_filt;
 static AlarmHysteresis  s_alarm;
 
+/* ---------------------------------------------------------------------------
+ * RAM 环形缓冲（黑匣子预存）
+ *
+ *  每次采样都只写 RAM，不动 EEPROM ⇒ 采样率保持 50ms，黑匣子能还原故障
+ *  前后的连续曲线。落 EEPROM 由两级触发：
+ *    ① 正常心跳：每 MONITOR_LOG_PERIOD 次采样刷 1 条（省 EEPROM 寿命）；
+ *    ② 异常触发：alarm 越限或安全态非 SAFE_RUN ⇒ 把缓冲内全部条目全速刷盘。
+ *
+ *  条目复用 EEPROM 记录的前 9 B 有效载荷布局（seq 在刷盘时才由 head_seq 填），
+ *  故 RAM 里直接存 16 B 定长，8 条即 128 B，60 条 960 B——F103RCT6 有 48KB
+ *  RAM，任务栈合计仅 4.6KB，该开销可接受。
+ * -------------------------------------------------------------------------*/
+typedef struct
+{
+    uint8_t  payload[EEPROM_REC_DATA_LEN];  /* seq + 时标 + alarm + raw + filt + pad */
+} LogEntry;
+
+static LogEntry s_ring[MONITOR_RING_N];
+static uint16_t s_ring_head = 0;   /* 下一次写入位置 */
+static uint16_t s_ring_len  = 0;   /* 当前有效条目数（未满时 < N） */
+
+/* head 提交点状态。声明上移至此处：ring_flush（黑匣子整批刷盘）也要读写它，
+ * 不能留在下方的 head A/B 段内。*/
+static uint8_t  s_head_slot = 0;    /* 0=A 1=B，当前活动份 */
+static uint32_t s_head_seq  = 0;
+
+/* ring_flush 需调用 head 提交函数，而其定义在下方 head A/B 读写段之后，
+ * 故在此前置声明（C89 不允许隐式声明，且 Keil ARMCC 默认按 C89 编译）。*/
+static int  head_write_one(uint16_t addr, uint32_t seq);
+
+static void ring_push(const uint8_t* payload)
+{
+    for (uint8_t i = 0; i < EEPROM_REC_DATA_LEN; i++)
+    {
+        s_ring[s_ring_head].payload[i] = payload[i];
+    }
+    s_ring_head = (uint16_t)((s_ring_head + 1u) % MONITOR_RING_N);
+    if (s_ring_len < MONITOR_RING_N) s_ring_len++;
+}
+
+/* 按时间顺序把 RAM 缓冲内全部条目刷入 EEPROM（黑匣子模式）。
+ * 返回成功刷写的条数；任一条失败即停止，保留其余条目待下次重试。 */
+static uint16_t ring_flush(void)
+{
+    uint16_t done = 0;
+    uint16_t start = (uint16_t)((s_ring_head + MONITOR_RING_N - s_ring_len) % MONITOR_RING_N);
+
+    for (uint16_t k = 0; k < s_ring_len; k++)
+    {
+        uint16_t idx = (uint16_t)((start + k) % MONITOR_RING_N);
+        uint8_t  rec[EEPROM_LOG_RECLEN];
+        for (uint8_t i = 0; i < EEPROM_REC_DATA_LEN; i++) rec[i] = s_ring[idx].payload[i];
+        rec[EEPROM_REC_CRC_OFF] = crc8_atm(0x00u, rec, EEPROM_REC_DATA_LEN);
+
+        uint16_t addr = EEPROM_LOG_BASE + (s_head_seq % EEPROM_LOG_N) * EEPROM_LOG_RECLEN;
+        if (BSP_AT24C256_Write(addr, rec, EEPROM_LOG_RECLEN) != 0)
+        {
+            Error_Record(ERR_EEPROM_WRITE);
+            break;   /* 写失败即停：剩余条目留在 RAM，下次触发时重试 */
+        }
+        s_head_seq++;
+        done++;
+    }
+
+    if (done == s_ring_len)
+    {
+        s_ring_len = 0;   /* 全部刷出，清空缓冲 */
+    }
+    else if (done > 0)
+    {
+        /* 保留未刷出的尾部条目 */
+        uint16_t keep = (uint16_t)(s_ring_len - done);
+        uint16_t nstart = (uint16_t)((start + done) % MONITOR_RING_N);
+        for (uint16_t k = 0; k < keep; k++)
+        {
+            uint16_t src = (uint16_t)((nstart + k) % MONITOR_RING_N);
+            for (uint8_t i = 0; i < EEPROM_REC_DATA_LEN; i++)
+            {
+                s_ring[k].payload[i] = s_ring[src].payload[i];
+            }
+        }
+        s_ring_len = keep;
+    }
+
+    /* **整批只提交一次 head**（而非每条各提交一次）。
+     * 这才是把 head 写入量真正压下来的关键：黑匣子一次刷 60 条，
+     * head 只被擦写 1 次 ⇒ head 寿命按「触发次数」而非「条数」计。
+     * 掉电语义不变：head 未提交 ⇒ 这一批都算未提交，下次从头重刷，
+     * 最坏代价是丢这一批 RAM 数据（RAM 本就是易失的，无额外损失）。*/
+    if (done > 0)
+    {
+        uint16_t next_slot = (uint16_t)(s_head_slot ^ 1u);
+        uint16_t next_addr = next_slot ? EEPROM_HEAD_B_ADDR : EEPROM_HEAD_A_ADDR;
+        if (head_write_one(next_addr, s_head_seq) != 0)
+        {
+            /* 提交失败：整批回退 seq，保持与 EEPROM 有效 head 一致 */
+            s_head_seq -= done;
+            Error_Record(ERR_EEPROM_WRITE);
+            return 0;
+        }
+        s_head_slot = (uint8_t)next_slot;
+    }
+    return done;
+}
+
 /* ---- head A/B 双份读写 ---- */
 /* 读一份 head：crc 校验通过才返回；失败返回 EEPROM_HEAD_INVALID */
 static uint32_t head_read_one(uint16_t addr)
@@ -148,9 +278,8 @@ static uint32_t head_load(uint8_t* active_slot)
 
 /* 写入一条监测记录（16B，带 seq + crc8），并提交 head。
  * 写序：先记录、后 head（head 为提交点）。head A/B 交替翻转，掉电只可能损坏
- * 非活动份，上电经 crc+seq 取较新者即可恢复一致 head。 */
-static uint8_t s_head_slot = 0;      /* 0=A 1=B，当前活动份 */
-static uint32_t s_head_seq = 0;
+ * 非活动份，上电经 crc+seq 取较新者即可恢复一致 head。
+ * 注：s_head_slot / s_head_seq 已上移至 RAM 环形缓冲段（ring_flush 也需访问）。*/
 
 static void eeprom_log(uint8_t hour, uint8_t min, uint8_t sec,
                        uint8_t alarm, uint16_t raw, uint16_t filt100)
@@ -295,15 +424,53 @@ void Monitor_Task(void* pvParameters)
             }
         }
 
-        /* --- 5. 周期落盘 + 推送日志队列(供通信任务上传) --- */
-        if ((++sample_cnt % MONITOR_LOG_PERIOD) == 0)
-        {
-            uint8_t h = 0, m = 0, s = 0;
+        /* --- 5. 采样入 RAM 环形缓冲（黑匣子预存，不直接写 EEPROM） ---
+         * 每拍都预存，故黑匣子能还原故障前后连续曲线；写 EEPROM 由下面两级触发。*/
+        uint8_t h = 0, m = 0, s = 0;
 #if USE_RTC_DEPENDENT
-            BSP_RTC_GetTime(&h, &m, &s);
+        BSP_RTC_GetTime(&h, &m, &s);
 #endif
-            uint16_t filt100 = (uint16_t)(filt * 100.0f);
-            eeprom_log(h, m, s, (uint8_t)lvl, raw, filt100);
+        uint16_t filt100 = (uint16_t)(filt * 100.0f);
+
+        uint8_t payload[EEPROM_REC_DATA_LEN];
+        payload[0] = (uint8_t)(s_head_seq & 0xFFu);   /* 占位 seq，刷盘时由 head_seq 覆盖 */
+        payload[1] = h; payload[2] = m; payload[3] = s;
+        payload[4] = (uint8_t)lvl;
+        payload[5] = (uint8_t)(raw & 0xFFu);
+        payload[6] = (uint8_t)((raw >> 8) & 0xFFu);
+        payload[7] = (uint8_t)(filt100 & 0xFFu);
+        payload[8] = (uint8_t)((filt100 >> 8) & 0xFFu);
+        for (uint8_t i = 9; i < EEPROM_REC_DATA_LEN; i++) payload[i] = 0;
+        ring_push(payload);
+
+        /* --- 6. 两级落盘触发 ---
+         * ① 正常心跳：每 MONITOR_LOG_PERIOD 次采样刷 1 条（30s，摊薄 head 磨损）
+         * ② 异常触发：报警越限或安全态非 SAFE_RUN ⇒ 黑匣子全速刷盘，
+         *    把 RAM 里最近 3s 现场连同当前点全部落盘，故障瞬间不丢数据。*/
+        uint8_t blackbox = 0;
+        if (xSystemStateMutex != NULL)
+        {
+            if (xSemaphoreTake(xSystemStateMutex, 0) == pdPASS)
+            {
+                blackbox = ((g_state.alarm != ALARM_NORMAL) ||
+                            (g_state.safety != SAFE_RUN)) ? 1u : 0u;
+                xSemaphoreGive(xSystemStateMutex);
+            }
+        }
+
+        if (blackbox || ((++sample_cnt % MONITOR_LOG_PERIOD) == 0))
+        {
+            if (blackbox)
+            {
+                /* 全速刷盘：整批只提交一次 head */
+                ring_flush();
+            }
+            else
+            {
+                /* 心跳：只刷最新一条，保留其余现场数据在 RAM 等待下次触发 */
+                s_ring_len = (s_ring_len > 0u) ? (uint16_t)(s_ring_len - 1u) : 0u;
+                eeprom_log(h, m, s, (uint8_t)lvl, raw, filt100);
+            }
 
             if (xLogQueue != NULL)
             {
@@ -314,7 +481,7 @@ void Monitor_Task(void* pvParameters)
             }
         }
 
-        /* --- 6. 低功耗：仅在使能且系统允许时，由 idle 钩子进入 STOP --- */
+        /* --- 7. 低功耗：仅在使能且系统允许时，由 idle 钩子进入 STOP --- */
         vTaskDelay(pdMS_TO_TICKS(MONITOR_PERIOD_MS));
     }
 }
