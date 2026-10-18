@@ -5,26 +5,43 @@
 #include "bsp_at24c256.h"
 #include "board_config.h"
 #include <string.h>
+#include <stddef.h>
 
 #define AT24_PAGE_SIZE  64
 #define I2C_TMO         100000
 
-static void I2C_WaitEvent(I2C_TypeDef* I2Cx, uint32_t ev)
+/* 返回 SUCCESS/ERROR，取代原来的 void，使上层能真正感知总线超时 */
+static int I2C_WaitEvent(I2C_TypeDef* I2Cx, uint32_t ev)
 {
     uint32_t t = I2C_TMO;
     while (I2C_CheckEvent(I2Cx, ev) != SUCCESS && t--) ;
+    return (t == 0) ? ERROR : SUCCESS;
 }
 
-static void I2C_AckPoll(I2C_TypeDef* I2Cx, uint8_t addr7)
+/* 写周期轮询：反复发 START + 地址，直到器件回 ACK（内部写周期 tWR 结束）为止。
+ * addr7w = 已含 R/W 位的 8 位地址（写=0xAE，读=0xAF），与 I2C_Send7bitAddress
+ * 的入参约定一致；本函数不再左移，否则会二次移位打到错误从机地址。
+ * 返回 1 = 本次已收到 ACK，0 = 轮询超时（器件无响应）。 */
+static uint8_t I2C_AckPoll(I2C_TypeDef* I2Cx, uint8_t addr7w)
 {
-    /* 写完成后轮询设备是否就绪（ACK） */
     uint32_t t = I2C_TMO;
-    do {
+    while (t--)
+    {
         I2C_GenerateSTART(I2Cx, ENABLE);
-        while (I2C_GetFlagStatus(I2Cx, I2C_FLAG_SB) == RESET && t--) ;
-        I2C_Send7bitAddress(I2Cx, addr7 << 1, I2C_Direction_Transmitter);
-    } while ((I2C_GetFlagStatus(I2Cx, I2C_FLAG_ADDR) == RESET) && t--);
-    I2C_GenerateSTOP(I2Cx, ENABLE);
+        if (I2C_CheckEvent(I2Cx, I2C_EVENT_MASTER_MODE_SELECT) != SUCCESS)
+        {
+            I2C_GenerateSTOP(I2Cx, ENABLE);
+            continue;
+        }
+        I2C_Send7bitAddress(I2Cx, addr7w, I2C_Direction_Transmitter);
+        if (I2C_CheckEvent(I2Cx, I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED) == SUCCESS)
+        {
+            I2C_GenerateSTOP(I2Cx, ENABLE);
+            return 1;      /* 器件已就绪 */
+        }
+        I2C_GenerateSTOP(I2Cx, ENABLE);
+    }
+    return 0;
 }
 
 void BSP_AT24C256_Init(void)
@@ -52,28 +69,58 @@ void BSP_AT24C256_Init(void)
 int BSP_AT24C256_Write(uint16_t addr, const uint8_t* data, uint16_t len)
 {
     uint16_t written = 0;
+    if (data == NULL) return -1;
+
     while (written < len)
     {
+        /* AT24C256 每 64 字节一页，页内地址自动回卷，故必须按页边界切块，
+         * 否则跨页的长写会在页末回卷覆写同页起始地址。 */
         uint16_t page_off = addr & (AT24_PAGE_SIZE - 1);
         uint16_t chunk = AT24_PAGE_SIZE - page_off;
         if (chunk > (len - written)) chunk = len - written;
 
         I2C_GenerateSTART(I2C2, ENABLE);
-        I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_MODE_SELECT);
+        if (I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_MODE_SELECT) != SUCCESS)
+        {
+            I2C_GenerateSTOP(I2C2, ENABLE);
+            return -1;
+        }
         I2C_Send7bitAddress(I2C2, AT24C256_ADDR, I2C_Direction_Transmitter);
-        I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED);
+        if (I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED) != SUCCESS)
+        {
+            I2C_GenerateSTOP(I2C2, ENABLE);
+            return -1;
+        }
+        /* 16 位字地址：高字节先发 */
         I2C_SendData(I2C2, (uint8_t)(addr >> 8));
-        I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_BYTE_TRANSMITTED);
+        if (I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_BYTE_TRANSMITTED) != SUCCESS)
+        {
+            I2C_GenerateSTOP(I2C2, ENABLE);
+            return -1;
+        }
         I2C_SendData(I2C2, (uint8_t)(addr & 0xFF));
-        I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_BYTE_TRANSMITTED);
+        if (I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_BYTE_TRANSMITTED) != SUCCESS)
+        {
+            I2C_GenerateSTOP(I2C2, ENABLE);
+            return -1;
+        }
 
         for (uint16_t i = 0; i < chunk; i++)
         {
             I2C_SendData(I2C2, data[written + i]);
-            I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_BYTE_TRANSMITTED);
+            if (I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_BYTE_TRANSMITTED) != SUCCESS)
+            {
+                I2C_GenerateSTOP(I2C2, ENABLE);
+                return -1;
+            }
         }
         I2C_GenerateSTOP(I2C2, ENABLE);
-        I2C_AckPoll(I2C2, AT24C256_ADDR);
+
+        /* 必须等器件内部写周期（tWR ≈ 5ms）结束，否则下一页写入会被 NACK */
+        if (I2C_AckPoll(I2C2, AT24C256_ADDR) == 0)
+        {
+            return -1;
+        }
 
         addr += chunk;
         written += chunk;
@@ -84,22 +131,47 @@ int BSP_AT24C256_Write(uint16_t addr, const uint8_t* data, uint16_t len)
 int BSP_AT24C256_Read(uint16_t addr, uint8_t* data, uint16_t len)
 {
     if (len == 0) return 0;
+    if (data == NULL) return -1;
 
     /* 写地址相位 */
     I2C_GenerateSTART(I2C2, ENABLE);
-    I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_MODE_SELECT);
+    if (I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_MODE_SELECT) != SUCCESS)
+    {
+        I2C_GenerateSTOP(I2C2, ENABLE);
+        return -1;
+    }
     I2C_Send7bitAddress(I2C2, AT24C256_ADDR, I2C_Direction_Transmitter);
-    I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED);
+    if (I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED) != SUCCESS)
+    {
+        I2C_GenerateSTOP(I2C2, ENABLE);
+        return -1;
+    }
     I2C_SendData(I2C2, (uint8_t)(addr >> 8));
-    I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_BYTE_TRANSMITTED);
+    if (I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_BYTE_TRANSMITTED) != SUCCESS)
+    {
+        I2C_GenerateSTOP(I2C2, ENABLE);
+        return -1;
+    }
     I2C_SendData(I2C2, (uint8_t)(addr & 0xFF));
-    I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_BYTE_TRANSMITTED);
+    if (I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_BYTE_TRANSMITTED) != SUCCESS)
+    {
+        I2C_GenerateSTOP(I2C2, ENABLE);
+        return -1;
+    }
 
     /* 重复起始 + 读相位 */
     I2C_GenerateSTART(I2C2, ENABLE);
-    I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_MODE_SELECT);
+    if (I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_MODE_SELECT) != SUCCESS)
+    {
+        I2C_GenerateSTOP(I2C2, ENABLE);
+        return -1;
+    }
     I2C_Send7bitAddress(I2C2, AT24C256_ADDR, I2C_Direction_Receiver);
-    I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_RECEIVER_MODE_SELECTED);
+    if (I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_RECEIVER_MODE_SELECTED) != SUCCESS)
+    {
+        I2C_GenerateSTOP(I2C2, ENABLE);
+        return -1;
+    }
 
     for (uint16_t i = 0; i < len; i++)
     {
@@ -107,7 +179,12 @@ int BSP_AT24C256_Read(uint16_t addr, uint8_t* data, uint16_t len)
         {
             I2C_AcknowledgeConfig(I2C2, DISABLE);
         }
-        I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_BYTE_RECEIVED);
+        if (I2C_WaitEvent(I2C2, I2C_EVENT_MASTER_BYTE_RECEIVED) != SUCCESS)
+        {
+            I2C_GenerateSTOP(I2C2, ENABLE);
+            I2C_AcknowledgeConfig(I2C2, ENABLE);
+            return -1;
+        }
         data[i] = I2C_ReceiveData(I2C2);
     }
     I2C_GenerateSTOP(I2C2, ENABLE);

@@ -110,7 +110,7 @@ scope: 项目背景与设备定位、命名理由（背景侧）；技术架构�
 | `pid.h` / `pid.c` | 算法库 | 串级双闭环 PID。提供**位置式**（`PID_Calc_Position`，用于外环姿态）与**增量式**（`PID_Calc_Incremental`，用于内环速度，返回增量由调用方累加）；含积分限幅（`integ_limit` 抗饱和）、输出限幅、`mode` 切换。 | `PID_Init` / `PID_SetTarget` / `PID_SetGains` / `PID_Reset`；结构体 `PID_Handle` 集中管理增益与限幅 |
 | `filter.h` / `filter.c` | 算法库 | 混合数字滤波：**去极值平均** + **一阶滞后**，抑制传感器脉冲与工频噪声。 | `Filter_TrimmedMean`（去最大最小后平均）、`Filter_FirstOrderLag`、`Filter_Update`（串联两者）；`Filter_Handle` 含 8 槽环形缓冲与 `alpha` 系数 |
 | `alarm.h` / `alarm.c` | 算法库 | 迟滞报警状态机。区分 `ALARM_NORMAL / WARN / CRIT`；以"进入阈值宽、退出阈值窄"的迟滞带避免临界点抖动误报。 | `Alarm_Init(ref, warn_enter, warn_exit, crit_enter)`、`Alarm_Update`、`Alarm_DeviationRatio` |
-| `safety_fsm.h` / `safety_fsm.c` | 算法库 | 多级安全状态机：`SAFE_RUN / WARN / BRAKE / ERROR`。`BRAKE` 与 `ERROR` 为**锁定态**，需显式清除，避免抖动误恢复。 | `Safety_Init`、`Safety_Update(speed, angle, tension)`、`Safety_ClearError` |
+| `safety_fsm.h` / `safety_fsm.c` | 算法库 | 多级安全状态机：`SAFE_RUN / WARN / BRAKE / ERROR`。三重抗误动：① **N-of-M 越限确认**（默认 5 拍中 3 拍越限才升级，单点尖峰不动作）；② **迟滞回差**（enter/exit 阈值分离，倾角 25° 进 / 22.5° 出）；③ **失效保持**（传感器失效按 fail-safe 视为越限，不当作 0 放行）。`BRAKE` 与 `ERROR` 为**锁定态**，需显式清除。 | `Safety_Init`、`Safety_Update(speed, angle, tension, SafetyInval*)`、`Safety_ClearError`、`Safety_Tripped` |
 | `uwb_2d.h` / `uwb_2d.c` | 算法库 | 二维定位解算。`UWB_Trilaterate2D` 以三基站坐标与三测量距离做最小二乘三边定位，解算标签坐标（米）。 | 输入 `anchors[3]`、`d[3]`；输出 `Point2D`，返回 0 成功 |
 
 ### 4.2 `app/bsp/` —— 板级支持 / 外设驱动层（直接操作 STM32 外设）
@@ -118,7 +118,7 @@ scope: 项目背景与设备定位、命名理由（背景侧）；技术架构�
 | 文件 | 类型 | 职责 | 关键接口 / 要点 |
 |---|---|---|---|
 | `bsp_adc.h` / `bsp_adc.c` | 驱动 | 压力变送器 ADC 采集。配置 `ADC1_CH4`（PA4，硬件 RC 低通 + TVS 前端），量程 0~10 bar，标称 5 bar。 | `BSP_ADC_Init`、`BSP_ADC_ReadRaw`（软件触发单次 12 位 0..4095） |
-| `bsp_at24c256.h` / `bsp_at24c256.c` | 驱动 | AT24C256 EEPROM（I2C2，与 MPU6050 同总线，地址 `0xAE`）。用于监测记录本地断点续传。 | `BSP_AT24C256_Init`、`BSP_AT24C256_Write/Read` |
+| `bsp_at24c256.h` / `bsp_at24c256.c` | 驱动 | AT24C256 EEPROM（I2C2，与 MPU6050 同总线，地址 `0xAE`）。用于监测记录本地断点续传。写后按页分块并轮询器件 ACK 等 tWR，读写均返回真实错误码。 | `BSP_AT24C256_Init`、`BSP_AT24C256_Write/Read` |
 | `bsp_esp8266.h` / `bsp_esp8266.c` | 驱动 | ESP8266 Wi-Fi **可选**上行（USART1，AT 指令）；未配置密钥时自动降级为仅调试串口。 | `BSP_ESP8266_Init`、`ESP8266_ConnectWiFi`、`ESP8266_OpenTCP`、`ESP8266_Send`；凭证经编译期宏占位，不内嵌真实密钥 |
 | `bsp_motor.h` / `bsp_motor.c` | 驱动 | 电机驱动：TIM1_CH1 PWM 调速、PB12/PB13 方向、TIM2 正交编码器读增量、状态指示（黄灯/蜂鸣/红灯）。 | `BSP_Motor_Init`、`BSP_Motor_SetDuty(0..999)`、`BSP_Motor_SetDir`、`BSP_Encoder_Reset`、`BSP_Encoder_ReadDelta`、`BSP_Status_Set` |
 | `bsp_rtc.h` / `bsp_rtc.c` | 驱动 | RTC（LSI）低功耗时基。支持 STOP 模式唤醒，用于电池供电长期监测。 | `BSP_RTC_Init`、`BSP_RTC_GetTime`、`BSP_RTC_SetWakeupSeconds`、`BSP_EnterStopUntilWakeup` |
@@ -145,7 +145,7 @@ scope: 项目背景与设备定位、命名理由（背景侧）；技术架构�
 |---|---|---|---|
 | `tasks.h` | 公共头 | 任务层中枢：任务 ID / 优先级 / 栈深定义；全局 `SystemState`（跨任务共享，互斥访问）、`xSystemStateMutex`、`xLogQueue`；各任务入口声明；`Control_ClearSafetyError` 供 HMI 清除锁定。 | `SystemState` 含控制/监测/定位/系统级字段；访问须持 `xSystemStateMutex` |
 | `control_task.c` | 任务 | **实时控制（最高优先级）**。等待 20ms 节拍信号量 → 采样编码器速度 + MPU6050 倾角 → 先跑安全状态机 → 再跑双闭环级联 PID（外环姿态 PD + 内环速度 PI 增量式，含积分限幅抗饱和）→ 输出 PWM/方向。BRAKE/ERROR 锁定输出 0。 | 浮点运算全在任务上下文（中断仅释放信号量）；状态指示：WARN→黄灯，ERROR/BRAKE→红灯；张力由监测子系统压力折算作为安全代理量 |
-| `monitor_task.c` | 任务 | **监测**。ADC 采样（压力变送器 0~10 bar）→ 混合滤波 → 迟滞报警 → 张力代理 → EEPROM 周期落盘（环形日志 128 条）→ 推送 `xLogQueue`；支持 RTC 时标与 STOP 低功耗（按需开启）。 | 采样 50ms、每 20 次（≈1s）落盘；异常数据落盘以便断网/复位后续传 |
+| `monitor_task.c` | 任务 | **监测**。ADC 采样（压力变送器 0~10 bar）→ 混合滤波 → 迟滞报警 → 张力代理 → EEPROM 周期落盘（环形日志 128 条 ×16 B，带 seq+crc8）→ 推送 `xLogQueue`；支持 RTC 时标与 STOP 低功耗（按需开启）。 | 采样 50ms、每 20 次（≈1s）落盘；head 采用 **A/B 双份 + crc8** 交替提交，上电取较新者；`Monitor_LogRead` 按 seq+crc 跳过撕裂条目实现断点续传 |
 | `comm_task.c` | 任务 | **通信**。周期生成系统状态快照经 `DBG_USART` 调试串口上报；ESP8266 Wi-Fi 为可选备份上行（状态 + 日志队列），未配置密钥时降级仅串口。 | 状态行含安全态/报警/气压/速度/坐标/错误数；凭证编译期占位符 |
 | `uwb_task.c` | 任务 | **定位**。周期性对三固定基站 TWR 测距 → `UWB_Trilaterate2D` 解算二维坐标 → 回写全局状态；测距失败记错（重试 3 次）。 | 基站坐标按现场标定；`USE_UWB_SUBSYS` 关闭时退化为仅心跳 |
 | `hmi_task.c` | 任务 | **人机交互**。OLED 四页显示（总览 / 控制 / 监测 / 定位）；KEY1 翻页、KEY2 清除安全锁定；LED 心跳/运行指示。 | 显示经由 `xSystemStateMutex` 拷贝快照，避免临界区过长 |
@@ -227,7 +227,7 @@ scope: 项目背景与设备定位、命名理由（背景侧）；技术架构�
 | Simulink 串级双闭环 PID（外 PD + 内 PI） | ✅ | `PID/Readme_PID.md` 完整建模（Simulink 模型用外环 Kp=2 Kd=0.5）；**实机部署最终整定**为外环 Kp=5 Kd=2、内环 Kp=12 Ki=0.5（`control_task.c` 宏定义） |
 | 平直段零稳态误差 / 零超调 | ✅ | PID 文档仿真结论 |
 | 坡度 0.26rad→1.5s 恢复；风载→2.0s 收敛 | ✅ | PID 文档：坡度突变 1.5s 内恢复（跌落<15%）；风流扰动摆角 2.0s 收敛至<0.02rad |
-| 多级安全状态机 RUN/WARN/BRAKE/ERROR | ✅ | `safety_fsm.h`：SAFE_RUN/WARN/BRAKE/ERROR 四态，BRAKE/ERROR 锁定需显式清除 |
+| 多级安全状态机 RUN/WARN/BRAKE/ERROR | ✅ | `safety_fsm.h`：SAFE_RUN/WARN/BRAKE/ERROR 四态，BRAKE/ERROR 锁定需显式清除；含 N-of-M 确认（3/5）、迟滞回差、失效保持 |
 | 独立看门狗 + 任务存活巡检 | ✅ | `housekeep_task.c`：IWDG 超时 1s、喂狗 200ms、`Health_Check` 巡检 |
 | UWB 定位（BU03 / UART-AT + 车上本地解算） | ✅ | `bsp_uwb.c` + `uwb_task.c`：BU03（基于 DW3000）经 USART3 UART-AT 测距，主机 `UWB_Trilaterate2D` Gauss-Newton 三边定位解算坐标；坐标在车上本地算出，不依赖地面（注：仓库内 `Modules/dw1000/deca_device.c` 为 DW3000 官方驱动，未接入活动路径，故不适用 SPI CRC） |
 

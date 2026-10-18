@@ -86,6 +86,14 @@ extern QueueHandle_t      xDoorCmdQueue;  /* 门锁请求队列(供其它任务�
 /* 控制任务对外接口（供 HMI 等人机交互清除锁定态） */
 void Control_ClearSafetyError(void);
 
+/* 监测日志对外接口（供通信任务做断点续传）
+ * Monitor_LogRead(back, out, len)：back=0 取最新一条有效记录，back=n 取第 n+1
+ *   条（向更旧方向）；内部按 crc8 + seq 连续性跳过掉电撕裂条目。
+ *   返回 1 = 成功填充 out，0 = 已无更多有效记录。
+ * Monitor_LogHead()：当前已提交的 head seq（= 已落盘记录总数）。 */
+int      Monitor_LogRead(uint32_t back, uint8_t* out, uint8_t len);
+uint32_t Monitor_LogHead(void);
+
 /* BCM 任务对外接口：投递一条门锁请求（任务上下文调用，不阻塞） */
 int  BCM_RequestDoorLock(uint8_t door_mask, uint8_t action);
 

@@ -30,6 +30,7 @@
 #define CTRL_INTEG_LIMIT       (300.0f)  /* 积分限幅(抗饱和) */
 #define CTRL_ENC_TO_SPEED      (1.0f)    /* 编码器计数增量 -> 速度系数 */
 #define CTRL_ANGLE_RATE_GAIN   (1.0f)    /* 角速度 = (angle - angle_prev)/dt 增益 */
+#define ANGLE_FILTER_ALPHA     (0.3f)    /* 倾角一阶滞后系数(20ms节拍→τ≈60ms)  */
 
 /* 安全阈值（与 Safety_Init 保持一致） */
 #define SAFE_TARGET_SPEED (60.0f)
@@ -48,7 +49,9 @@ void Control_ClearSafetyError(void)
     Safety_ClearError(&s_safety);
 }
 static float      s_angle_prev = 0.0f;
+static float      s_angle_filt = 0.0f;   /* 倾角一阶滞后输出（进安全 FSM 前平滑） */
 static float      s_duty = 0.0f;   /* 增量式累加后的占空比 */
+static uint8_t     s_mpu_ok = 1;  /* DMP 本拍是否有效 */
 
 void Control_Task(void* pvParameters)
 {
@@ -87,14 +90,20 @@ void Control_Task(void* pvParameters)
         float speed = (float)enc_delta * CTRL_ENC_TO_SPEED; /* 速度估计 */
 
 #if USE_MPU6050_DMP
-        static uint8_t mpu_ok = 1;
         if (MPU6050_DMP_GetData(&pitch, &roll, &yaw) != 0)
         {
-            if (mpu_ok) { Error_Record(ERR_MPU_DMP); mpu_ok = 0; }
+            if (s_mpu_ok) { Error_Record(ERR_MPU_DMP); s_mpu_ok = 0; }
         }
-        else mpu_ok = 1;
+        else s_mpu_ok = 1;
 #endif
-        float angle = pitch;
+        /* 倾角先经一阶滞后平滑再进安全状态机：DMP 单点跳变不再直接触发 BRAKE。
+         * alpha 0.3 在 20ms 节拍下时间常数约 60ms，既压尖峰又不明显滞后。
+         * DMP 失效时保持上一拍滤波值，并由 SafetyInval 上报 fail-safe。 */
+        if (s_mpu_ok)
+        {
+            s_angle_filt = s_angle_filt + ANGLE_FILTER_ALPHA * (pitch - s_angle_filt);
+        }
+        float angle = s_angle_filt;
         float angle_rate = (angle - s_angle_prev) / (CONTROL_PERIOD_MS / 1000.0f);
         s_angle_prev = angle;
 
@@ -109,8 +118,10 @@ void Control_Task(void* pvParameters)
             }
         }
 
-        /* --- 2. 安全状态机（先于控制生效，越限即动作） --- */
-        SafetyState st = Safety_Update(&s_safety, speed, angle, tension);
+        /* --- 2. 安全状态机（先于控制生效，越限即动作）
+         *     传感器失效经 SafetyInval 上报，FSM 内按 fail-safe 处理为最保守值。 --- */
+        SafetyInval inv = { 0u, (uint8_t)!s_mpu_ok, 0u };
+        SafetyState st = Safety_Update(&s_safety, speed, angle, tension, &inv);
 
 #if USE_CAN_SUBSYS
         /* 车身联动：仅在"刚进入" BRAKE/ERROR 锁定时请求一次全车落锁，
