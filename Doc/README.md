@@ -108,7 +108,7 @@ scope: 项目背景与设备定位、命名理由（背景侧）；技术架构�
 | 文件 | 类型 | 职责 | 关键接口 / 要点 |
 |---|---|---|---|
 | `pid.h` / `pid.c` | 算法库 | 串级双闭环 PID。提供**位置式**（`PID_Calc_Position`，用于外环姿态）与**增量式**（`PID_Calc_Incremental`，用于内环速度，返回增量由调用方累加）；含积分限幅（`integ_limit` 抗饱和）、输出限幅、`mode` 切换。 | `PID_Init` / `PID_SetTarget` / `PID_SetGains` / `PID_Reset`；结构体 `PID_Handle` 集中管理增益与限幅 |
-| `filter.h` / `filter.c` | 算法库 | 混合数字滤波：**去极值平均** + **一阶滞后**，抑制传感器脉冲与工频噪声。 | `Filter_TrimmedMean`（去最大最小后平均）、`Filter_FirstOrderLag`、`Filter_Update`（串联两者）；`Filter_Handle` 含 8 槽环形缓冲与 `alpha` 系数 |
+| `filter.h` / `filter.c` | 算法库 | 混合数字滤波，**两级串联**：① **去极值平均**（8 槽缓冲去掉一个最大、一个最小后除 n−2，抗单点飞点/脉冲尖峰）；② **一阶滞后**（`y=prev+α(x−prev)`，抗工频与缓慢抖动）。顺序不可颠倒——先去极值再滞后，避免滞后把尖峰缓慢扩散成持续偏差。 | `Filter_TrimmedMean`、`Filter_FirstOrderLag`、`Filter_Update`（串联两者）；`Filter_Handle` 含 8 槽环形缓冲与 `alpha` 系数。压力通道 `alpha=0.2`（50 ms 采样，τ≈12.5 ms）；倾角通道 `alpha=0.3`（20 ms 节拍，τ≈60 ms），见 `control_task.c` 的 `ANGLE_FILTER_ALPHA` |
 | `alarm.h` / `alarm.c` | 算法库 | 迟滞报警状态机。区分 `ALARM_NORMAL / WARN / CRIT`；以"进入阈值宽、退出阈值窄"的迟滞带避免临界点抖动误报。 | `Alarm_Init(ref, warn_enter, warn_exit, crit_enter)`、`Alarm_Update`、`Alarm_DeviationRatio` |
 | `safety_fsm.h` / `safety_fsm.c` | 算法库 | 多级安全状态机：`SAFE_RUN / WARN / BRAKE / ERROR`。三重抗误动：① **N-of-M 越限确认**（默认 5 拍中 3 拍越限才升级，单点尖峰不动作）；② **迟滞回差**（enter/exit 阈值分离，倾角 25° 进 / 22.5° 出）；③ **失效保持**（传感器失效按 fail-safe 视为越限，不当作 0 放行）。`BRAKE` 与 `ERROR` 为**锁定态**，需显式清除。 | `Safety_Init`、`Safety_Update(speed, angle, tension, SafetyInval*)`、`Safety_ClearError`、`Safety_Tripped` |
 | `uwb_2d.h` / `uwb_2d.c` | 算法库 | 二维定位解算。`UWB_Trilaterate2D` 以三基站坐标与三测量距离做最小二乘三边定位，解算标签坐标（米）。 | 输入 `anchors[3]`、`d[3]`；输出 `Point2D`，返回 0 成功 |
@@ -143,13 +143,51 @@ scope: 项目背景与设备定位、命名理由（背景侧）；技术架构�
 
 | 文件 | 类型 | 职责 | 关键要点 |
 |---|---|---|---|
-| `tasks.h` | 公共头 | 任务层中枢：任务 ID / 优先级 / 栈深定义；全局 `SystemState`（跨任务共享，互斥访问）、`xSystemStateMutex`、`xLogQueue`；各任务入口声明；`Control_ClearSafetyError` 供 HMI 清除锁定。 | `SystemState` 含控制/监测/定位/系统级字段；访问须持 `xSystemStateMutex` |
-| `control_task.c` | 任务 | **实时控制（最高优先级）**。等待 20ms 节拍信号量 → 采样编码器速度 + MPU6050 倾角 → 先跑安全状态机 → 再跑双闭环级联 PID（外环姿态 PD + 内环速度 PI 增量式，含积分限幅抗饱和）→ 输出 PWM/方向。BRAKE/ERROR 锁定输出 0。 | 浮点运算全在任务上下文（中断仅释放信号量）；状态指示：WARN→黄灯，ERROR/BRAKE→红灯；张力由监测子系统压力折算作为安全代理量 |
-| `monitor_task.c` | 任务 | **监测**。ADC 采样（压力变送器 0~10 bar）→ 混合滤波 → 迟滞报警 → 张力代理 → EEPROM 周期落盘（环形日志 128 条 ×16 B，带 seq+crc8）→ 推送 `xLogQueue`；支持 RTC 时标与 STOP 低功耗（按需开启）。 | 采样 50ms、每 20 次（≈1s）落盘；head 采用 **A/B 双份 + crc8** 交替提交，上电取较新者；`Monitor_LogRead` 按 seq+crc 跳过撕裂条目实现断点续传 |
+| `tasks.h` | 公共头 | 任务层中枢：任务 ID / 优先级 / 栈深定义；全局 `SystemState`（跨任务共享，互斥访问）、`xSystemStateMutex`、`xLogQueue`；各任务入口声明；`Control_ClearSafetyError` 供 HMI 清除锁定；`Monitor_LogRead` / `Monitor_LogHead` 供通信任务做断点续传。 | `SystemState` 含控制/监测/定位/系统级字段；访问须持 `xSystemStateMutex` |
+| `control_task.c` | 任务 | **实时控制（最高优先级）**。等待 20ms 节拍信号量 → 采样编码器速度 + MPU6050 倾角（**先经一阶滞后 α=0.3 平滑再进安全状态机**，τ≈60ms）→ 先跑安全状态机 → 再跑双闭环级联 PID（外环姿态 PD + 内环速度 PI 增量式，含积分限幅抗饱和）→ 输出 PWM/方向。BRAKE/ERROR 锁定输出 0。 | 浮点运算全在任务上下文（中断仅释放信号量）；状态指示：WARN→黄灯，ERROR/BRAKE→红灯；张力由监测子系统压力折算作为安全代理量；`SafetyInval` 上报 DMP 失效供 fail-safe 判定 |
+| `monitor_task.c` | 任务 | **监测**。ADC 采样（压力变送器 0~10 bar）→ 两级混合滤波 → 迟滞报警 → 张力代理 → EEPROM 周期落盘（环形日志 128 条 ×16 B）→ 推送 `xLogQueue`；支持 RTC 时标与 STOP 低功耗（按需开启）。记录布局与掉电安全详见 §4.5。 | 采样 50ms、每 20 次（≈1s）落盘，覆盖 128s≈2min08s |
 | `comm_task.c` | 任务 | **通信**。周期生成系统状态快照经 `DBG_USART` 调试串口上报；ESP8266 Wi-Fi 为可选备份上行（状态 + 日志队列），未配置密钥时降级仅串口。 | 状态行含安全态/报警/气压/速度/坐标/错误数；凭证编译期占位符 |
 | `uwb_task.c` | 任务 | **定位**。周期性对三固定基站 TWR 测距 → `UWB_Trilaterate2D` 解算二维坐标 → 回写全局状态；测距失败记错（重试 3 次）。 | 基站坐标按现场标定；`USE_UWB_SUBSYS` 关闭时退化为仅心跳 |
 | `hmi_task.c` | 任务 | **人机交互**。OLED 四页显示（总览 / 控制 / 监测 / 定位）；KEY1 翻页、KEY2 清除安全锁定；LED 心跳/运行指示。 | 显示经由 `xSystemStateMutex` 拷贝快照，避免临界区过长 |
 | `housekeep_task.c` | 任务 | **系统守护**。IWDG 喂狗（周期 200ms ≪ 超时 1s）+ `Health_Check` 任务存活巡检 + 复位溯源（IWDG 复位标志记 `ERR_WATCHDOG_RESET`）；刷新全局 uptime/错误计数。 | 任一高优先级任务长期卡死 → 本任务无法及时喂狗 → 硬件复位自愈 |
+
+### 4.5 EEPROM 环形日志布局与掉电安全（`monitor_task.c`）
+
+**地址布局**（AT24C256，页长 64 B，总容量 32 KB）
+
+| 区域 | 地址 | 容量 | 内容 |
+|---|---|---|---|
+| head A | `0x0000` | 5 B | `seq(4, LE)` + `crc8(1)` |
+| head B | `0x0008` | 5 B | `seq(4, LE)` + `crc8(1)` |
+| 日志区 | `0x0010`–`0x080F` | 128 × 16 B = 2048 B | 环形记录 |
+| — | — | 合计 2058 B（占 32 KB 的 6.3%） | — |
+
+**单条记录 16 B逐字段分配**（`monitor_task.c` `eeprom_log`）
+
+| 偏移 | 长度 | 字段 | 取值 |
+|---|---|---|---|
+| `rec[0]` | 1 | seq | `head_seq & 0xFF`，128 槽循环 |
+| `rec[1..3]` | 3 | 时标 hour/min/sec | 来自 RTC；覆盖时长仅 128 s，跨天概率极低，故不存日期 |
+| `rec[4]` | 1 | alarm | `Alarm_Update` 输出：0=NORMAL / 1=WARN / 2=CRIT |
+| `rec[5..6]` | 2 | raw | ADC 12 位原始值 0–4095，小端 |
+| `rec[7..8]` | 2 | filt100 | **滤波后气压 ×100**（0–1000 对应 0–10 bar），分辨率≈0.01 bar |
+| `rec[9..14]` | 6 | 预留扩展 | 当前填 0；预留毫秒 / 温度 / 故障码 |
+| `rec[15]` | 1 | crc8 | `crc8_atm(rec[0..14])`，poly=0x07 init=0x00 |
+
+> **有效数据 9 B + 预留 6 B + CRC 1 B = 16 B。** 其中滤波值以「浮点 ×100 的整数」落盘而非原始 float：既省 2 B，又让解析端无需处理与平台相关的浮点字节序。
+> **预留 6 B 并非凑数**：记录长度必须整除页长 64 B 才能保证单条永不跨页——实测 10 B 与 12 B 均会跨页（12 B 时 128 槽中有 16 槽跨界），16 B 时每页整放 4 条、共 32 页。多出的 6 B 正好留作扩展字段，将来加字段无需重排布局或重算跨页。
+
+**掉电安全：三重保护**
+
+1. **写序保证 head 是提交点**：先写记录 → `seq++` → 提交到另一份 head。记录写失败或 head 提交失败均**回退 `seq`**，保证 head 始终与 EEPROM 中的有效状态一致。掉电落在记录写窗口 ⇒ head 未推进 ⇒ 该槽尚未提交，下次直接覆盖。
+2. **head A/B 双份交替**：每落一条翻转写入另一份，两份同在页 0。掉电最多损坏非活动那份，活动份完好。
+3. **每条记录自带 seq + CRC-8**：可逐条判定完整性，而非仅按位置推定。
+
+**上电恢复与续传**
+
+- `head_load()`：读 A/B 两份，**crc 不符者直接判废**，取「校验通过且 seq 较大」者；新旧比较用模 2³² 无符号差值 `(b-a) < 0x80000000`，正确处理 seq 回绕。
+- `Monitor_LogRead(back, out, len)`：自最新一条向旧扫描，逐条校验 `crc8` 与 `seq` 连续性，任一不符即 `continue` 跳过（不中断扫描），**撕裂条目被精确识别并丢弃，不会被当作有效历史**。
+- `Monitor_LogHead()`：返回已提交 head，即续传起点。
 
 ---
 
