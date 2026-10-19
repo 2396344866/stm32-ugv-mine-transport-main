@@ -3,14 +3,18 @@
 """
 monitor_task.c 的 EEPROM 日志布局 / CRC / 磨损寿命自校验。
 
-布局参数一律**从源码宏解析**，不在此硬编码，避免代码改了就��校验脚本失配
+布局参数一律**从源码宏解析**，不在此硬编码，避免代码改动后校验脚本失配
 （历史教训：曾把 12 B 记录的期望值写死，代码改成 16 B 后脚本一直报假 FAIL）。
 
-磨损寿命依据 AT24C256C datasheet Table 4-6：
-  Write Endurance = 1,000,000 Write Cycles，**按字节(cell)计，不按页计**。
-  页(64B)只是 I2C 写缓冲的传输粒度，擦写只作用到目标字节的浮栅。
-  ⇒ head A / head B 分处两个字节单元，A/B 交替即得2× 延寿；
-    **无需为「跨页」挪地址**（收益为零，且会讲错 EEPROM 机理）。
+两处设计约束的依据（注意二者**目的不同，不要混为一谈**）：
+  · Write Endurance = 1,000,000 Write Cycles，**按字节(cell)计**。
+    页(64B) 只是 I2C 写缓冲的传输粒度 => 就**寿命**而言，同页不同字节各享
+    独立预算，跨页并不额外延寿。
+  · datasheet 7.4 Write Cycle Timing：tWR 内部自定时写周期内
+    "any attempts to read from or write to the memory array will not be
+    processed"，正在被改写的单元处于不确定态 => 同页的 head 会被同一次
+    高压写周期波及、一起变不确定。
+    **head A/B 跨 64B 物理页的目的是「掉电物理故障隔离」，不是延寿。**
 """
 import os
 import re
@@ -37,6 +41,7 @@ RECLEN = macro("EEPROM_LOG_RECLEN")
 CRC_OFF = macro("EEPROM_REC_CRC_OFF")
 HEAD_A = macro("EEPROM_HEAD_A_ADDR")
 HEAD_B = macro("EEPROM_HEAD_B_ADDR")
+HEAD_RECLEN = macro("EEPROM_HEAD_RECLEN")
 LOG_PERIOD = macro("MONITOR_LOG_PERIOD")
 RING_N = macro("MONITOR_RING_N")
 SAMPLE_MS = macro("MONITOR_PERIOD_MS")
@@ -79,10 +84,31 @@ chk(RECLEN % (PAGE // (PAGE // RECLEN)) == 0 and RECLEN <= PAGE and PAGE % RECLE
 crosses = [i for i in range(N) if ((BASE + i * RECLEN) % PAGE) + RECLEN > PAGE]
 chk(not crosses, "单条记录永不跨页 (违规槽: %s)" % crosses)
 
-# head 两份必须是**不同字节单元**（endurance 按字节计）；同页但不同地址是允许的
-chk(HEAD_A != HEAD_B, "head A(0x%04X) 与 head B(0x%04X) 是两个不同字节单元" % (HEAD_A, HEAD_B))
-same_page_note = "同页(页%d)" % (HEAD_A // PAGE) if HEAD_A // PAGE == HEAD_B // PAGE else "跨页"
-print("[info] head A/B %s —— endurance 按字节计，同页不同字节仍各自独立预算" % same_page_note)
+# head 两份必须**跨 64B 物理页**：tWR 写周期内同页数据一并处于不确定态，
+# 同页则 A/B 双份会被同一次高压写周期一起打废，双份冗余失效。
+head_a_page = HEAD_A // PAGE
+head_b_page = HEAD_B // PAGE
+chk(head_a_page != head_b_page,
+    "head A(0x%04X, 页%d) 与 head B(0x%04X, 页%d) 分处不同 64B 物理页"
+    % (HEAD_A, head_a_page, HEAD_B, head_b_page))
+
+# 日志区必须与两个 head 所在页都不同页，且不与 head 区域地址重叠
+log_page0 = BASE // PAGE
+log_page1 = (BASE + N * RECLEN - 1) // PAGE
+chk(log_page0 not in (head_a_page, head_b_page) and log_page1 not in (head_a_page, head_b_page),
+    "日志区(页%d..页%d) 与 head A(页%d)/head B(页%d) 均不同页"
+    % (log_page0, log_page1, head_a_page, head_b_page))
+
+# head 各自占用的字节不得越出本页（避免踩到日志区）
+chk(HEAD_A + HEAD_RECLEN <= (head_a_page + 1) * PAGE
+    and HEAD_B + HEAD_RECLEN <= (head_b_page + 1) * PAGE,
+    "head A/B 各5 B 均不越出本页边界")
+
+# 区域地址不重叠
+log_end = BASE + N * RECLEN
+chk(HEAD_A + HEAD_RECLEN <= HEAD_B and HEAD_B + HEAD_RECLEN <= BASE,
+    "地址不重叠: headA[0x%04X..) < headB[0x%04X..) <日志区(0x%04X..0x%04X)"
+    % (HEAD_A, HEAD_B, BASE, log_end - 1))
 
 # ---------- 磨损寿命核算 ----------
 log_interval_s = LOG_PERIOD * SAMPLE_MS / 1000.0          # 一条日志的间隔
