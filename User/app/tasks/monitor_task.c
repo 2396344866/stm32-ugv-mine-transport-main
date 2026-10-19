@@ -19,9 +19,48 @@
 /* ---- 监测参数 ---- */
 #define MONITOR_PERIOD_MS     (50)     /* 采样周期 */
 #define MONITOR_LOG_PERIOD    (600)    /* 每 600 次采样(30s)心跳落盘一次——见下方磨损均衡说明 */
+#define MONITOR_LOG_PERIOD_HI (200)    /* 偏离正常时的加密节拍：200次=10s（见"分层落盘"） */
+#define MONITOR_DEV_WARN      (0.05f)  /* 偏差 >5% 即视为趋势可疑，切换到加密节拍 */
 #define MONITOR_RING_N        (60)     /* RAM 环形缓冲深度(条)：60×50ms=3s 现场数据 */
 #define PRESSURE_VREF         (3.3f)
 #define PRESSURE_FULL_SCALE   (10.0f)  /* 变送器量程 0..10 bar */
+
+/* ---------------------------------------------------------------------------
+ * 变送器输出规格与标定（4~20mA 电流环，井下牵引/制动管路的工程标准配置）
+ *
+ *  为什么按 4~20mA 而不是 0~10V —— 三个理由，都是现场硬约束：
+ *  ① **长距离传输抗干扰**：巷道变频器/牵引逆变器噪声大，电流环(4~20mA)
+ *     的信号强度与传输距离无关、且是恒流源驱动，衰减小、抗共模干扰；
+ *     0~10V 电压式在长线上衰减与干扰成正比，读数会漂。
+ *  ② **可检测断线**：4~20mA 约定"低于 3.6mA 即断线/故障"。电压式在断线时
+ *     输出 0V，与"真实的 0 压力"无法区分 —— 这是本质缺陷，见下方判据。
+ *  ③ **本安与供电共用**：两线制变送器由同一对线既供电又传信号，井下本安
+ *     回路只允许极小电压/电流，降低关联设备风险。
+ *
+ *  标定链路（采样电阻R_SHUNT 上拉，ADC 读数）：
+ *      I = 4mA .. 20mA        ⇒ V_SHUNT = 0.8V .. 4.0V（取 R_SHUNT=200Ω）
+ *      0 bar  ⇒ 4 mA  ⇒ 0.8 V
+ *      10 bar ⇒ 20 mA ⇒ 4.0 V
+ *  ⚠️ 注意：4.0V > VREF(3.3V)，故必须分压。本工程按 2:1 分压接入 PA4：
+ *      V_ADC = V_SHUNT / 2  ⇒  0.4V .. 2.0V
+ *      ADC_RAW(0 bar)  = 0.4 / 3.3 × 4095 ≈ 496
+ *      ADC_RAW(10 bar) = 2.0 / 3.3 × 4095 ≈ 2481
+ *  ⇒ 换算式为**带零点偏置的线性标定**，不再是 raw/4095×FS：
+ *      bar = (raw - RAW_AT_0BAR) / (RAW_AT_FSBAR - RAW_AT_0BAR) × 10.0
+ *  ⇒ ADC 量程只用 0.4~2.0V 一段（约 1985 counts），分辨率 ≈ 5 mbar/LSB，
+ *     相对 10 bar 量程足够（0.05%）。
+ * ==========================================================================*/
+#define PRESSURE_RAW_AT_0BAR  (496)    /* 0 bar  对应的 ADC 原始值 */
+#define PRESSURE_RAW_AT_FSBAR (2481)   /* 10 bar 对应的 ADC 原始值 */
+
+/* 断线/超量程判据（基于标定区间两端，不用"raw==0"这种脆弱写法）：
+ *   低于 ADC_FAULT_LOW  ⇒ 断线（4~20mA 环开路 => 回读 < 4mA）
+ *   高于 ADC_FAULT_HIGH ⇒ 超出量程（传感器故障/短路/超压）
+ * 判据取"区间外扩 10% 计数"，避免临界抖动；命中即上报失效，走 fail-safe。*/
+#define ADC_FAULT_LOW        ((PRESSURE_RAW_AT_0BAR * 9) / 10)    /* ≈ 446 */
+#define ADC_FAULT_HIGH       (((PRESSURE_RAW_AT_FSBAR - PRESSURE_RAW_AT_0BAR) * 11 / 10) \
+                              + PRESSURE_RAW_AT_0BAR)              /* ≈ 2729 */
+
 #define PRESSURE_NOMINAL      (5.0f)   /* 标称气压(bar)，报警参考 */
 #define FILTER_ALPHA          (0.2f)   /* 一阶滞后系数 */
 #define TENSION_PER_BAR       (15.0f)  /* 气压 -> 张力代理增益(N/bar) */
@@ -143,9 +182,10 @@ static AlarmHysteresis  s_alarm;
  * RAM 环形缓冲（黑匣子预存）
  *
  *  每次采样都只写 RAM，不动 EEPROM ⇒ 采样率保持 50ms，黑匣子能还原故障
- *  前后的连续曲线。落 EEPROM 由两级触发：
- *    ① 正常心跳：每 MONITOR_LOG_PERIOD 次采样刷 1 条（省 EEPROM 寿命）；
- *    ② 异常触发：alarm 越限或安全态非 SAFE_RUN ⇒ 把缓冲内全部条目全速刷盘。
+ *  前后的连续曲线。落 EEPROM 由**三层自适应节拍**驱动（见 Monitor_Task）：
+ *    ① 正常（偏差≤5%）→ 30 s 心跳，最省寿命；
+ *    ② 趋势可疑（偏差>5%）→ 10 s 加密，抓缓慢渐变过程；
+ *    ③ 异常（报警越限 / 安全态非 SAFE_RUN / ADC 失效）→ 每拍分步全速刷盘。
  *
  *  条目复用 EEPROM 记录的前 9 B 有效载荷布局（seq 在刷盘时才由 head_seq 填），
  *  故 RAM 里直接存 16 B 定长，8 条即 128 B，60 条 960 B——F103RCT6 有 48KB
@@ -160,6 +200,7 @@ static LogEntry s_ring[MONITOR_RING_N];
 static uint16_t s_ring_head = 0;   /* 下一次写入位置 */
 static uint16_t s_ring_len  = 0;   /* 当前有效条目数（未满时 < N） */
 static uint8_t  s_blackbox  = 0;   /* 黑匣子锁存标志：置位后持续分步刷到缓冲清空 */
+static uint8_t  s_adc_bad   = 0;   /* ADC 失效标志：raw 落在标定区间外（断线/超量程） */
 
 /* head 提交点状态。声明上移至此处：ring_flush_step（黑匣子分步刷盘）也要读写它，
  * 不能留在下方的 head A/B 段内。*/
@@ -442,17 +483,42 @@ void Monitor_Task(void* pvParameters)
     {
         Health_Report(TASK_ID_MONITOR);
 
-        /* --- 1. ADC 采样 --- */
+        /* --- 1. ADC 采样 + 失效判据 ---
+         * 变送器为 4~20mA 电流环 + 分压标定，0 bar 对应 raw≈496、10 bar≈2481。
+         * 因此判据**不能写 raw==0**——那既不覆盖开路回读偏低的真实情形，
+         * 也会把"合法的 0 bar 附近读数"误判。改为区间外判据：
+         *   raw < ADC_FAULT_LOW   ⇒ 电流环开路/断线（低于 3.6mA 约定）
+         *   raw > ADC_FAULT_HIGH  ⇒ 超量程（传感器故障/短路/超压）
+         * 命中即置失效标志并记错，**且不再把该拍数据送入滤波**——
+         * 否则一个坏值会被两级滤波当成正常值吃掉，故障被"抹平"而失去告警。*/
         raw = BSP_ADC_ReadRaw();
-        if (raw == 0 && BSP_ADC_ReadRaw() == 0)
+        if (raw < ADC_FAULT_LOW || raw > ADC_FAULT_HIGH)
         {
-            /* 连续两次为 0 视为读取异常（变送器断线/短路） */
+            s_adc_bad = 1u;
             Error_Record(ERR_ADC_READ);
         }
+        else
+        {
+            s_adc_bad = 0u;
+        }
 
-        /* 12 位原始值 -> 气压(bar) */
-        bar = ((float)raw / 4095.0f) * PRESSURE_VREF / PRESSURE_VREF * PRESSURE_FULL_SCALE;
-        /* 注：上式保留 VREF 变量以体现标定，实际量程线性映射 */
+        /* 带零点偏置的线性标定（4~20mA 规格，见上方说明）：
+         *   bar = (raw - RAW_AT_0BAR) / (RAW_AT_FS - RAW_AT_0BAR) × 10.0
+         * 失效拍取"量程下限"作为保守代表值，而不是 0 bar ——
+         * 气压过低对应张力不足，同样属于危险工况。*/
+        if (s_adc_bad)
+        {
+            bar = 0.0f;
+        }
+        else
+        {
+            bar = ((float)raw - (float)PRESSURE_RAW_AT_0BAR)
+                / ((float)PRESSURE_RAW_AT_FSBAR - (float)PRESSURE_RAW_AT_0BAR)
+                * PRESSURE_FULL_SCALE;
+            /* 标定区间外做钳位，防止标定误差把值推到量程之外 */
+            if (bar < 0.0f)   bar = 0.0f;
+            if (bar > PRESSURE_FULL_SCALE) bar = PRESSURE_FULL_SCALE;
+        }
 
         /* --- 2. 混合滤波 --- */
         filt = Filter_Update(&s_filt, bar);
@@ -471,6 +537,7 @@ void Monitor_Task(void* pvParameters)
                 g_state.pressure_filt = filt;
                 g_state.alarm         = lvl;
                 g_state.tension       = tension;
+                g_state.pressure_bad  = s_adc_bad;   /* 供 control_task fail-safe 判定 */
                 xSemaphoreGive(xSystemStateMutex);
             }
         }
@@ -494,13 +561,21 @@ void Monitor_Task(void* pvParameters)
         for (uint8_t i = 9; i < EEPROM_REC_DATA_LEN; i++) payload[i] = 0;
         ring_push(payload);
 
-        /* --- 6. 两级落盘触发 ---
-         * ① 正常心跳：每 MONITOR_LOG_PERIOD 次采样刷 1 条（30s，摊薄 head 磨损）
-         * ② 异常触发：报警越限或安全态非 SAFE_RUN ⇒ 黑匣子模式置位，
-         *    **每拍只分步刷 RING_FLUSH_BATCH 条**，摊平 tWR 阻塞，
-         *    保证不挤占 control_task 的 ≤20ms 制动响应窗口。
-         *    s_blackbox 锁存：一旦触发就持续刷到缓冲清空，
-         *    避免故障持续期间判据反复造成"刷一半停一停"。*/
+        /* --- 6. 分层落盘触发（解决"寿命"与"取证分辨率"的矛盾） ---
+         *
+         *  只用 30s 心跳会漏掉**缓慢渐变**故障（如管路缓慢泄漏、闸阀缓卡）：
+         * 这类故障在到达报警阈值前要几分钟，30s 采样只能看到几个孤立点，
+         * 无法还原演化过程 —— 事后追溯失效。
+         *  但若常态就用 50ms 落盘，head 寿命又回到 23 天。
+         *
+         *  ⇒ 三层自适应节拍，用"数据价值"决定采样密度，而不是一刀切：
+         *    ① 正常（偏差 ≤5%）：30s 心跳，最省寿命（head ≈694 天）；
+         *    ② 趋势可疑（偏差 >5%，尚未报警）：**10s 加密**，抓渐变过程；
+         *       此时 head 每 20s 写一次 ⇒ 寿命 ≈231 天，仍在可接受区间
+         *       （对比 5s 加密只有 116 天，不足以支撑长周期运行，故取 10s）；
+         *    ③ 异常（报警越限 / 安全态非 SAFE_RUN / ADC 失效）：
+         *       **50ms 全速黑匣子**（见下 s_blackbox），无损。
+         *  三层之间靠偏差判据自动切换，无需人工干预。*/
         uint8_t blackbox = 0;
         if (xSystemStateMutex != NULL)
         {
@@ -510,6 +585,12 @@ void Monitor_Task(void* pvParameters)
                             (g_state.safety != SAFE_RUN)) ? 1u : 0u;
                 xSemaphoreGive(xSystemStateMutex);
             }
+        }
+        /* ADC 失效同样触发黑匣子：传感器断线本身就是必须取证的事件 */
+        if (s_adc_bad)
+        {
+            blackbox = 1;
+            s_blackbox = 1;
         }
         if (blackbox)
         {
@@ -525,11 +606,24 @@ void Monitor_Task(void* pvParameters)
             /* 分步刷盘：单次阻塞 ≤ RING_FLUSH_BATCH × tWR(≈10ms) < 20ms 节拍 */
             (void)ring_flush_step();
         }
-        else if ((!s_blackbox) && ((++sample_cnt % MONITOR_LOG_PERIOD) == 0))
+        else if (!s_blackbox)
         {
-            /* 心跳：只刷最新一条，保留其余现场数据在 RAM 等待下次触发 */
-            s_ring_len = (s_ring_len > 0u) ? (uint16_t)(s_ring_len - 1u) : 0u;
-            eeprom_log(h, m, s, (uint8_t)lvl, raw, filt100);
+            /* 分层心跳：趋势可疑时用 10s 密节拍，其余用 30s 疏节拍。
+             * 偏差用**滤波后**值判断，避免噪声本身把节拍一直拉高。*/
+            float dev = (PRESSURE_NOMINAL > 0.0f)
+                      ? ((filt - PRESSURE_NOMINAL) / PRESSURE_NOMINAL)
+                      : 0.0f;
+            if (dev < 0.0f) dev = -dev;
+            uint32_t period = (dev > MONITOR_DEV_WARN)
+                            ? (uint32_t)MONITOR_LOG_PERIOD_HI
+                            : (uint32_t)MONITOR_LOG_PERIOD;
+
+            if ((++sample_cnt % period) == 0)
+            {
+                /* 心跳：只刷最新一条，保留其余现场数据在 RAM 等待下次触发 */
+                s_ring_len = (s_ring_len > 0u) ? (uint16_t)(s_ring_len - 1u) : 0u;
+                eeprom_log(h, m, s, (uint8_t)lvl, raw, filt100);
+            }
         }
 
         if (xLogQueue != NULL)

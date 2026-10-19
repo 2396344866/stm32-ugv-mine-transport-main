@@ -57,10 +57,11 @@ typedef struct
     uint32_t control_ticks; /* 控制环累计节拍数 */
 
     /* 监测子系统 */
-    uint16_t pressure_raw;  /* ADC 原始值 0..4095 */
+    uint16_t pressure_raw;  /* ADC 原始值 0..4095（4~20mA 标定：0bar≈496 / 10bar≈2481） */
     float    pressure_bar;  /* 折算气压(bar) */
     float    pressure_filt; /* 滤波后气压 */
     AlarmLevel alarm;       /* 报警等级 */
+    uint8_t  pressure_bad;  /* 气压采样失效（断线/超量程）→ control_task 据此走 fail-safe */
 
     /* 定位子系统 */
     Point2D position;       /* 二维解算坐标(米) */

@@ -107,20 +107,25 @@ void Control_Task(void* pvParameters)
         float angle_rate = (angle - s_angle_prev) / (CONTROL_PERIOD_MS / 1000.0f);
         s_angle_prev = angle;
 
-        /* 张力代理值：由监测子系统气压折算（项目特定传感器可替换） */
+        /* 张力代理值：由监测子系统气压折算（项目特定传感器可替换）
+         * 同时取回气压采样有效性标志：变送器断线/超量程时张力不可信，
+         * 必须经 SafetyInval 上报，让 FSM 按 fail-safe 处理为最保守值，
+         * 而**不是**把一个错误的 tension=0 当成"张力为零=安全"放行。 */
         float tension = 0.0f;
+        uint8_t pressure_bad = 0u;
         if (xSystemStateMutex != NULL)
         {
             if (xSemaphoreTake(xSystemStateMutex, 0) == pdPASS)
             {
-                tension = g_state.tension;
+                tension      = g_state.tension;
+                pressure_bad = g_state.pressure_bad;
                 xSemaphoreGive(xSystemStateMutex);
             }
         }
 
         /* --- 2. 安全状态机（先于控制生效，越限即动作）
          *     传感器失效经 SafetyInval 上报，FSM 内按 fail-safe 处理为最保守值。 --- */
-        SafetyInval inv = { 0u, (uint8_t)!s_mpu_ok, 0u };
+        SafetyInval inv = { 0u, (uint8_t)!s_mpu_ok, pressure_bad };
         SafetyState st = Safety_Update(&s_safety, speed, angle, tension, &inv);
 
 #if USE_CAN_SUBSYS
