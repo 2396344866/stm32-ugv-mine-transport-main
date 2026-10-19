@@ -33,7 +33,7 @@ scope: 固件工程构建环境、目录结构、7 任务清单；不含 CAN 协
 ## 2. 目录结构
 
 ```
-demo_seial_OLED_stm32f103rct6/
+stm32-ugv-mine-transport-main/  （仓库根目录）
 ├─ Core/                     # CMSIS：core_cm3.c/h、system_stm32f10x.c/h
 ├─ FWLib/                    # STM32 标准外设库（StdPeriph 3.5/3.6，全量 src）
 ├─ Middlewares/FreeRTOS/     # FreeRTOS 10.5.1（include / portable/GCC/ARM_CM3 / portable/RVDS/ARM_CM3 / MemMang）
@@ -53,7 +53,7 @@ demo_seial_OLED_stm32f103rct6/
 │  └─ Modules/
 │     ├─ mpu6050/  # MPU6050 DMP 运动驱动（活动 IMU，I2C2）
 │     └─ dw1000/   # DW3000 UWB 寄存器/设备 API（目录名沿用 dw1000，实为 DW3000；bsp_uwb 以 UART-AT 方式驱动 BU03）
-├─ Motion_driver/  # MPU9250 eMPL 运动驱动 —— 保留但未编入
+├─ # Motion_driver/（MPU9250 eMPL）**不在本仓**（第三方库不随仓发布，见根 `Readme.md` §六），故不列入目录树
 ├─ Project/
 │  ├─ stm32f103RCT6.uvprojx  # Keil 工程
 │  ├─ stm32f103RCT6.uvoptx
@@ -73,9 +73,9 @@ demo_seial_OLED_stm32f103rct6/
 | 车身 CAN（片内 bxCAN，PA11/PA12 + TJA1050） | **活动** | BCM 向车门控制器下发落锁指令；详见 `Doc/CAN_BCM车门落锁.md` |
 | MPU6050 DMP（I2C2） | **活动** | 姿态解算 IMU（控制/HMI 任务依赖） |
 | 安信可 BU03 UWB（基于 DW3000，UART-AT） | **活动**（bsp 层） | `bsp_uwb.c` 以 AT 指令驱动 BU03 模组，未直接调用 deca 底层 `.c` |
-| MPU9250 eMPL（Motion_driver/） | 保留不编译 | 工程统一采用 MPU6050 DMP 单 IMU 方案，MPU9250 文件原样保留但不参与默认编译 |
+| MPU9250 eMPL（Motion_driver/） | 保留不编译（方案说明） | 工程统一采用 MPU6050 DMP 单 IMU 方案，MPU9250 文件**不在本仓**（第三方库不随仓发布，见根 `Readme.md` §六），当前仅作「保留不编译」的方案说明 |
 
-> 选择理由（用户确认）：工程统一采用 **MPU6050 DMP 单 IMU 方案** 进行姿态解算，MPU9250 相关文件原样保留在目录中，
+> 选择理由（用户确认）：工程统一采用 **MPU6050 DMP 单 IMU 方案** 进行姿态解算，MPU9250 相关文件**不在本仓**（第三方库不随仓发布，见根 `Readme.md` §六），
 > 但不参与默认编译，避免多 IMU 方案带来的冗余与维护成本。
 
 ---

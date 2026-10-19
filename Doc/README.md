@@ -107,7 +107,7 @@ scope: 项目背景与设备定位、命名理由（背景侧）；技术架构�
 
 | 文件 | 类型 | 职责 | 关键接口 / 要点 |
 |---|---|---|---|
-| `pid.h` / `pid.c` | 算法库 | 串级双闭环 PID。提供**位置式**（`PID_Calc_Position`，用于外环姿态）与**增量式**（`PID_Calc_Incremental`，用于内环速度，返回增量由调用方累加）；含积分限幅（`integ_limit` 抗饱和）、输出限幅、`mode` 切换。 | `PID_Init` / `PID_SetTarget` / `PID_SetGains` / `PID_Reset`；结构体 `PID_Handle` 集中管理增益与限幅 |
+| `pid.h` / `pid.c` | 算法库 | 串级双闭环 PID。提供**位置式**（`PID_Calc_Position`）与**增量式**（`PID_Calc_Incremental`，用于内环速度，返回增量由调用方累加）；**注：外环当前为手写 PD（`control_task.c`，仅调用 `PID_Calc_Incremental`，未接入 `PID_Calc_Position`）**；含积分限幅（`integ_limit` 抗饱和）、输出限幅、`mode` 切换。 | `PID_Init` / `PID_SetTarget` / `PID_SetGains` / `PID_Reset`；结构体 `PID_Handle` 集中管理增益与限幅 |
 | `filter.h` / `filter.c` | 算法库 | 混合数字滤波，**两级串联**：① **去极值平均**（8 槽缓冲去掉一个最大、一个最小后除 n−2，抗单点飞点/脉冲尖峰）；② **一阶滞后**（`y=prev+α(x−prev)`，抗工频与缓慢抖动）。顺序不可颠倒——先去极值再滞后，避免滞后把尖峰缓慢扩散成持续偏差。 | `Filter_TrimmedMean`、`Filter_FirstOrderLag`、`Filter_Update`（串联两者）；`Filter_Handle` 含 8 槽环形缓冲与 `alpha` 系数。压力通道 `alpha=0.2`（50 ms 采样，τ≈12.5 ms）；倾角通道 `alpha=0.3`（20 ms 节拍，τ≈60 ms），见 `control_task.c` 的 `ANGLE_FILTER_ALPHA` |
 | `alarm.h` / `alarm.c` | 算法库 | 迟滞报警状态机。区分 `ALARM_NORMAL / WARN / CRIT`；以"进入阈值宽、退出阈值窄"的迟滞带避免临界点抖动误报。 | `Alarm_Init(ref, warn_enter, warn_exit, crit_enter)`、`Alarm_Update`、`Alarm_DeviationRatio` |
 | `safety_fsm.h` / `safety_fsm.c` | 算法库 | 多级安全状态机：`SAFE_RUN / WARN / BRAKE / ERROR`。三重抗误动：① **N-of-M 越限确认**（默认 5 拍中 3 拍越限才升级，单点尖峰不动作）；② **迟滞回差**（enter/exit 阈值分离，倾角 25° 进 / 22.5° 出）；③ **失效保持**（传感器失效按 fail-safe 视为越限，不当作 0 放行）。`BRAKE` 与 `ERROR` 为**锁定态**，需显式清除。 | `Safety_Init`、`Safety_Update(speed, angle, tension, SafetyInval*)`、`Safety_ClearError`、`Safety_Tripped` |
@@ -284,7 +284,7 @@ EEPROM 单条写入含 tWR ≈ 5 ms 内部写周期。若一次刷满 60 条，*
 
 | 文件 | 职责 |
 |---|---|
-| `main.c` | 固件入口：`System_Init` 硬件初始化；创建互斥量/队列；`Scheduler_Init`；启动 6 个任务；FreeRTOS 钩子（idle 省电 `__WFI`、栈溢出、malloc 失败）。 |
+| `main.c` | 固件入口：`System_Init` 硬件初始化；创建互斥量/队列；`Scheduler_Init`；启动 7 个任务；FreeRTOS 钩子（idle 省电 `__WFI`、栈溢出、malloc 失败）。 |
 | `board_config.h` | 统一板级配置：FW 名/版本、特性开关（`USE_*`）、引脚资源表、控制节拍 20ms。所有驱动/任务从此取引脚定义，避免分散硬编码。 |
 | `stm32f10x_it.c` / `.h` | 中断服务：转发 `SVC/PendSV/SysTick` 至 FreeRTOS；各 USART 中断调 `BSP_USART_IRQHandler`；TIM3 中断调 `Scheduler_ControlTickISR`。 |
 | `FreeRTOSConfig.h` | FreeRTOS 内核配置（任务数、优先级、堆等）。 |
@@ -384,12 +384,12 @@ SafetyState st  = Safety_Update(&s_safety, speed, angle, tension, &inv);
 
 | 简历表述 | 状态 | 代码证据 |
 |---|---|---|
-| 6 个 FreeRTOS 任务（控制/监测/定位/通信/HMI/看家） | ✅ | `tasks.h`：TASK_ID_CONTROL/MONITOR/UWB/HMI/COMM/HOUSEKEEP 共 6；优先级 5/3/2/2/1/4 |
+| 7 个 FreeRTOS 任务（控制/监测/定位/通信/HMI/看家/车身CAN） | ✅ | `tasks.h`：TASK_ID_CONTROL/MONITOR/UWB/HMI/COMM/HOUSEKEEP/BCM 共 7；优先级 5/3/2/2/1/4/3 |
 | 三子系统统一 FreeRTOS 架构 | ✅ | 控制 `control_task`、监测 `monitor_task`、定位 `uwb_task` 同工程协同调度 |
 | GCC/Keil 双工具链编译链接 | ✅ | `Project/build.py`（arm-none-eabi-gcc，产物 .elf/.hex/.bin）；Keil `stm32f103RCT6.uvprojx` + RVDS 移植层 + `syscalls.c` ARMCC retarget |
 | GCC/Keil 双工具链 + STM32 硬件烧录与台架验证 | ✅ | Keil ARMCC V5 工程已编译并**烧录至真实 STM32F103RCT6 板卡**（用户实机烧录运行）；并搭建台架完成坡道带载运行验证，实机调速表现与 Simulink 建模预期一致；GCC 工具链经本机 `build.py` 编译验证（零警告）。双工具链编译链接 + 硬件烧录 + 台架运行验证均已完成 |
 | 统一 MPU6050 DMP 姿态解算 | ✅ | `Modules/mpu6050` + `inv_mpu.c`（`#define MPU6050`）经 I2C2(PB10/PB11) 采集，DMP 输出欧拉角/四元数；工程姿态解算统一为 MPU6050 单 IMU 方案 |
-| Simulink 串级双闭环 PID（外 PD + 内 PI） | ✅ | `PID/Readme_PID.md` 完整建模（Simulink 模型用外环 Kp=2 Kd=0.5）；**实机部署最终整定**为外环 Kp=5 Kd=2、内环 Kp=12 Ki=0.5（`control_task.c` 宏定义） |
+| Simulink 串级双闭环 PID（外 PD + 内 PI） | ✅ | `PID仿真测参/Readme_PID.md` 完整建模（Simulink 模型用外环 Kp=2 Kd=0.5）；**实机部署最终整定**为外环 Kp=5 Kd=2、内环 Kp=12 Ki=0.5（`control_task.c` 宏定义） |
 | 平直段零稳态误差 / 零超调 | ✅ | PID 文档仿真结论 |
 | 坡度 0.26rad→1.5s 恢复；风载→2.0s 收敛 | ✅ | PID 文档：坡度突变 1.5s 内恢复（跌落<15%）；风流扰动摆角 2.0s 收敛至<0.02rad |
 | 多级安全状态机 RUN/WARN/BRAKE/ERROR | ✅ | `safety_fsm.h`：SAFE_RUN/WARN/BRAKE/ERROR 四态，BRAKE/ERROR 锁定需显式清除；含 N-of-M 确认（3/5）、迟滞回差、失效保持 |
@@ -404,9 +404,9 @@ SafetyState st  = Safety_Update(&s_safety, speed, angle, tension, &inv);
 |---|---|---|
 | 目标 MCU | STM32F103RCT6（Cortex-M3 @72MHz，256KB Flash / 48KB RAM） | `board_config.h` |
 | 固件体积（GNU 构建实测） | FLASH 47,984 B / 256 KB = **18.30%**；RAM 32,784 B / 48 KB = **66.70%** | `Build/firmware.map`（arm-none-eabi-gcc 13.x，零警告） |
-| 任务调度 | FreeRTOS 10.5.1，6 任务，优先级 5/3/2/2/1/4 | `tasks.h` |
-| 控制算法 | 串级双闭环 PID：外环姿态 PD（**部署值** Kp=5, Kd=2）+ 内环速度 PI 增量式（Kp=12, Ki=0.5）；Simulink 前期建模用外环 Kp=2, Kd=0.5 | `algo/pid.c`、`control_task.c`（宏）、`PID/Readme_PID.md` |
-| 仿真性能 | 平直段零稳态误差 / 零超调；坡度 0.26 rad 阶跃 1.5s 内恢复（跌落 <15%）；风流扰动摆角 2.0s 收敛至 <0.02 rad | `PID/Readme_PID.md` |
+| 任务调度 | FreeRTOS 10.5.1，7 任务，优先级 5/3/2/2/1/4/3 | `tasks.h` |
+| 控制算法 | 串级双闭环 PID：外环姿态 PD（**部署值** Kp=5, Kd=2）+ 内环速度 PI 增量式（Kp=12, Ki=0.5）；Simulink 前期建模用外环 Kp=2, Kd=0.5 | `algo/pid.c`、`control_task.c`（宏）、`PID仿真测参/Readme_PID.md` |
+| 仿真性能 | 平直段零稳态误差 / 零超调；坡度 0.26 rad 阶跃 1.5s 内恢复（跌落 <15%）；风流扰动摆角 2.0s 收敛至 <0.02 rad | `PID仿真测参/Readme_PID.md` |
 | 安全机制 | 4 态状态机（RUN/WARN/BRAKE/ERROR，后两态锁定）；IWDG 超时 1s、喂狗周期 200ms、任务存活巡检 | `safety_fsm.h`、`housekeep_task.c` |
 | 定位 | 集成安信可 BU03（基于 DW3000，UART-AT TWR），3 基站 Gauss-Newton 三边定位（周期 200ms、重试 3 次），坐标车上本地解算 | `uwb_task.c`、`bsp_uwb.c` |
 | 双工具链 + 硬件烧录 | GCC：arm-none-eabi-gcc 产物 .elf/.hex/.bin 零警告（本机编译验证）；Keil ARMCC V5 + RVDS 移植层 + `syscalls.c` retarget 已修复，并**烧录至真实 STM32F103RCT6 板卡运行**（实机验证） | `build.py`、`stm32f103RCT6.uvprojx` |

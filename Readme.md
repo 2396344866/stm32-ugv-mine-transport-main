@@ -20,11 +20,11 @@ scope: 项目总入口：定位、系统架构、任务划分、通信链路；�
 
 | 任务 | 优先级 | 周期 | 职责 |
 |---|---|---|---|
-| 控制任务（control） | 5（最高） | 1 ms（TIM7 节拍） | 编码器测速 + MPU6050 倾角 + 串级 PID 输出 PWM + 电磁刹车 |
+| 控制任务（control） | 5（最高） | 20 ms（TIM3 节拍） | 编码器测速 + MPU6050 倾角 + 串列 PID 输出 PWM + 电磁刹车 |
 | 监测任务（monitor） | 3 | 50 ms | 压力变送器 ADC 混合滤波 + 迟滞报警 |
 | 定位任务（uwb） | 2 | 200 ms | 集成安信可 BU03（基于 DW3000）TWR 测距 + 三边定位（坐标车上本地解算） |
 | 通信任务（comm） | 2 | 1000 ms | 遥测帧经调试串口输出；ESP8266 WiFi 为可选备份上行 |
-| HMI 任务（hmi） | 1 | 200 ms | OLED 刷新 + 按键扫描 |
+| HMI 任务（hmi） | 1 | 100 ms | OLED 刷新 + 按键扫描 |
 | 看家任务（housekeep） | 4 | 200 ms | IWDG 喂狗 + 任务存活巡检 + 健康管理 |
 | 车身任务（bcm） | 3 | 20 ms | 片内 bxCAN（PA11/PA12 + TJA1050，500 kbit/s）向车门控制器下发门锁指令；回执按 SEQ 配对，超时重发 ≤3 次 |
 
@@ -37,7 +37,7 @@ scope: 项目总入口：定位、系统架构、任务划分、通信链路；�
 ## 三、目录结构
 
 ```
-RCT6/
+stm32-ugv-mine-transport-main/  （仓库根目录）
 ├── Core/            CMSIS 内核（core_cm3 等）
 ├── FWLib/            STM32 标准外设库（StdPeriph）
 ├── Middlewares/     FreeRTOS 10.5.1（RVDS/ARM_CM3 移植层）
