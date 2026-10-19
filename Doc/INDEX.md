@@ -1,7 +1,7 @@
 ---
 status: active
 owner: user
-last_reviewed: 2026-10-05
+last_reviewed: 2026-10-19
 scope: 本仓 Markdown 文档库唯一入口。登记每份文档的主题、边界与状态；不含文档正文内容。
 ---
 
@@ -53,3 +53,4 @@ scope: 本仓 Markdown 文档库唯一入口。登记每份文档的主题、边
 |---|---|---|
 | 2026-10-05 | 建索引；6 份文档补 front matter（scope 逐份判定） | `audit.md` 2026-10-05 审计（工作区留档） |
 | 2026-10-15 | `README.md` 正文更新：新增 §4.5「EEPROM 环形日志布局与掉电安全」（16 B逐字段分配、三重掉电保护、续传接口）；`filter` 条目展开为两级串联滤波；`control_task.c` / `monitor_task.c` / `tasks.h` 条目对齐代码。文档数不变，故主稿表不变 | 代码提交 `1fdffe2` |
+| 2026-10-19 | `README.md` 新增 §6.3「UWB 定位为什么不接安全状态机（防误动设计）」：UWB 数据流隔离、三条真实误触发通路的 N-of-M/迟滞/fail-safe、纠正「20 ms 电磁刹车」措辞；§4.5 掉电保护第 2 条改为「head A/B 分处第 0/第 1 物理页」（原写「同在页 0」与代码冲突）。根 `Readme.md` 同步：EEPROM 口径改为跨物理页、UWB 条目补安全边界。代码侧仅注释修正（记录预留字节 3→6、`ADC_FAULT_HIGH` 注释 2729→2679） | `User/app/tasks/monitor_task.c`、`control_task.c`、`safety_fsm.c`、`uwb_task.c` 回读 |

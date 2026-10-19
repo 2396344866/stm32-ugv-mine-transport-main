@@ -59,7 +59,7 @@
  * 判据取"区间外扩 10% 计数"，避免临界抖动；命中即上报失效，走 fail-safe。*/
 #define ADC_FAULT_LOW        ((PRESSURE_RAW_AT_0BAR * 9) / 10)    /* ≈ 446 */
 #define ADC_FAULT_HIGH       (((PRESSURE_RAW_AT_FSBAR - PRESSURE_RAW_AT_0BAR) * 11 / 10) \
-                              + PRESSURE_RAW_AT_0BAR)              /* ≈ 2729 */
+                              + PRESSURE_RAW_AT_0BAR)              /* ≈2679 */
 
 #define PRESSURE_NOMINAL      (5.0f)   /* 标称气压(bar)，报警参考 */
 #define FILTER_ALPHA          (0.2f)   /* 一阶滞后系数 */
@@ -113,7 +113,7 @@
  *
  *  记录（16 B）：
  *    seq(1) hour(1) min(1) sec(1) alarm(1) raw(2,LE) filt100(2,LE)
- *    pad(3) crc8(1)  —— 后 5 B 预留扩展（如毫秒/温度/故障码），当前填 0
+ *    pad(6) crc8(1)  —— rec[9..14] 共 6 B 预留扩展（毫秒/温度/故障码），当前填 0
  *
  *  为何取 16 B：AT24C256 页长 64 B，16 是 64 的整数倍 ⇒ 每页整放 4 条，
  *  **单条永不跨页**，无需在写入路径里拆页事务（避免每条多一次 tWR 等待，
